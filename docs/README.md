@@ -28,6 +28,9 @@
    - 整理插件从酒馆中提取的具体数据（如上下文、角色、世界书、接口配置）以及对应的功能支持。
    - 细化插件所订阅的酒馆事件监听机制。
 
+6. [历史消息正则处理 (history_regex.md)](history_regex.md)
+   - 说明送入 Tracker 前的逐楼层提取／排除规则、处理顺序与预览配置。
+
 ---
 
 ## 快速入口
@@ -35,3 +38,5 @@
 - **UI 结构**: [settings.html](../settings.html)
 - **核心逻辑执行**: [scripts/tools.js](../scripts/tools.js)
 - **状态管理器**: [scripts/state.js](../scripts/state.js)
+- **历史消息处理**: [scripts/history_regex.js](../scripts/history_regex.js)
+- **外部记忆读取**: [scripts/memory_sources.js](../scripts/memory_sources.js)

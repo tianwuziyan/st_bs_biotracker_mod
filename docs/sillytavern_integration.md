@@ -105,19 +105,21 @@
 
 当插件需要分析会话内容、拉取模型或进行角色初始推演时，会通过网络与外部的 OpenAI 兼容 API 发起通信：
 
-### 1. 对话补全接口 (Tracker 追踪与注册推演)
+### 1. OpenAI 兼容对话补全接口 (Tracker 追踪与注册推演)
 - **外部发送端点**：`apiBase + '/chat/completions'`
 - **文件定位**：`scripts/api.js` -> 函数 `callOpenAICompatible(payload, settings)`
-- **通信协议**：`POST` 请求。通过 `globalThis.fetch(url, options)` 直接发送或通过酒馆后端转发（Tauri 代理）。
+- **通信协议**：`POST` 请求。当前代码只使用 OpenAI 兼容的 `/chat/completions` 格式；通过 `globalThis.fetch(url, options)` 直接发送，或在浏览器跨域时通过酒馆后端代理。
 - **发送信息**：
   - **Headers**：`Content-Type: application/json` 和 `Authorization: Bearer <API_KEY>`（直接通信时）或带 `X-CSRF-Token` 的酒馆代理头。
   - **Payload**：
     - `model`：在 SYSTEM 设置页所填写的模型名称。
     - `messages`：包含组装好的 Tracker 引导 System Prompt、当前角色的 `existing_state` JSON 状态文本、近期对话上下文（`contextSize` 楼层数）、以及通过外部记忆源检索出的长记忆。
       > **注意**：从安全与隐私角度出发，为了**禁止记忆（外部历史记忆源摘要）泄露到主线 user 消息或在直接通信 Payload 中过度传输**，Payload 的 `safePayload` 会显式删除 `memory_context`（外部记忆上下文文本）与 `memory_source`（记忆源标识）这两个可能包含敏感历史总结的字段。
-    - `response_format`：设置为 `{"type": "json_object"}` 限制输出格式。
+    - `response_format`：默认设置为 `{"type": "json_object"}` 限制输出格式；可在设置中关闭格式化输出兼容模式。
     - 推理参数：`temperature`、`top_p`、`frequency_penalty` 等。
 - **作用**：向大模型发送上下文让其解析剧情，并返回符合格式的调度指令 `tool_calls`。
+
+> 当前版本不包含 Responses、Claude Messages 或 Gemini Interactions 等额外 API 格式。后续如重新引入，需同步更新 `scripts/api.js`、`scripts/state.js`、设置页和测试，不能只修改本说明。
 
 ### 2. 模型列表获取接口 (API 连接测试)
 - **外部发送端点**：`apiBase + '/models'`
@@ -125,6 +127,11 @@
 - **通信协议**：`GET` 请求。
 - **发送信息**：带鉴权的 Headers，不含 Payload。
 - **作用**：拉取 API 支持的模型列表，供玩家在 SYSTEM 设置页的下拉菜单直接选择。
+
+### 3. API 安全与超时约束
+- **文件定位**：`scripts/api.js` -> `assertSafeDirectApiBase()`、`resolveApiTimeoutMs()`、`resolveOverallDeadlineMs()`。
+- **安全规则**：公网 `http://` 地址会被拒绝；本机和内网 HTTP 地址允许使用。非 HTTP(S) 协议会被拒绝，错误消息中的 API Key、Token 等敏感字段会脱敏。
+- **超时规则**：单次请求默认超时 `180000ms`，可由 `apiTimeoutMs` 调整；重试与 JSON 纠错请求还受整轮总时限约束。
 
 ---
 

@@ -13,7 +13,8 @@
   - **UI 页面渲染**：操作 DOM 填充 `settings.html` 中的模板，渲染「概述」、「注册」、「追踪」、「技能图鉴」、「衣柜管理」、「系统设置」等多个子页面。
   - **浮动功能球 (Floating Sphere)**：实现了可以在屏幕上自由拖拽的浮动状态球，支持长按呼出追踪菜单、双击开启即时分析、以及显示更新气泡通知（`UPDATE_CUE_EVENT`）。
   - **宿主生命周期监听**：注册 SillyTavern 等宿主平台的事件回调（如 `APP_READY`、`CHAT_CHANGED`、`CHAT_CREATED` 等），在聊天切换、新对话创建、对话删除时执行相应的状态重置或快照同步。
-  - **主题切换逻辑**：支持包括 `retro`、`cultivation`、`fantasy` 等 12 种主题风格的 CSS 类切换。
+  - **主题切换逻辑**：支持 `retro`、`cultivation`、`fantasy`、`cyber-egypt`、`wasteland`、`sakura`、`holo`、`gothic`、`steampunk`、`eldritch`、`ink`、`constructivism` 共 12 种主题风格的 CSS 类切换。
+  - **设置辅助功能**：管理历史消息正则规则、外部记忆源选择、世界书过滤和 API 请求状态等设置页交互。
 
 ### 2. `settings.html` (前端 DOM 模版)
 - **定位**：插件的 HTML UI 结构文件。
@@ -42,7 +43,8 @@
 - **核心功能**：
   - **结构化输出防护**：支持对不同 LLM 自动适配（例如识别 DeepSeek 系列模型并额外注入结构化 V4 提示词、开启/关闭 `response_format`）。
   - **JSON 提取容错**：`extractJson()` 方法支持从 Markdown 代码块（` ```json `）、脏文本、甚至未闭合的大括号截取中安全还原出 JSON 对象，防止因为模型输出多余解释文字而报错。
-  - **代理请求**：由于部分环境的跨域限制，提供了 `buildHostProxyConfig()` 函数，优先利用宿主环境的代理转发 API 请求并带上 CSRF Token。
+  - **代理请求**：由于部分环境的跨域限制，提供了 `buildHostProxyConfig()` 函数，优先利用宿主环境的代理转发 API 请求并带上 CSRF Token；代理失败时按状态码和响应内容决定是否回退直连。
+  - **请求控制**：通过 `resolveApiTimeoutMs()` 和 `resolveOverallDeadlineMs()` 限制单次请求及整轮重试时长，并对公网 HTTP、错误信息中的密钥进行安全校验或脱敏。
 
 ### 2. `host.js` (宿主兼容层驱动)
 - **定位**：抹平不同宿主软件（SillyTavern、Luker、TauriTavern）之间的 API 差异。
@@ -112,30 +114,34 @@
 ### 11. `memory_sources.js` (外部记忆桥接器)
 - **定位**：长文本或外部插件记忆提取模块。
 - **核心功能**：
-  - 实现从 SillyTavern 官方的 Anima 扩展、第三方柏宝书（STBaiBaiBook）或世界书里的特定命名条目中，采用中日韩二元滑动窗口分词（Tokenizer）和相关性打分算法，为 Tracker LLM 提供当前故事的背景记忆快照。
+  - 实现从 SillyTavern 官方的 Anima 扩展、第三方柏宝书（STBaiBaiBook）或世界书里的数据库纪要条目中，采用中日韩二元滑动窗口分词（Tokenizer）和相关性打分算法，为 Tracker LLM 提供当前故事的背景记忆快照；四种来源互斥，内置记忆为默认选项。
 
-### 12. `registry_psy_config.js` (心智状态分级标准数据)
+### 12. `history_regex.js` (历史消息正则处理器)
+- **定位**：在 Tracker 组装历史消息前，对每一楼文本执行用户配置的提取／排除规则。
+- **核心功能**：支持 `/pattern/flags` 与纯文本正则、捕获组提取、规则启用／停用及按配置顺序处理；只生成分析用副本，不修改宿主原始聊天记录。
+
+### 13. `registry_psy_config.js` (心智状态分级标准数据)
 - **定位**：描述角色心理变化的量化标准。
 - **核心功能**：
   - **三大指标六大阶段**：针对感知度、渴望度、自主性等，详细列出了从 0、1~25 到 100+ 等各个数值区间的行为表现。
   - **升级/越限条件**：详细规定了如从 0 突破到 1+ 必须经历的事件，以及超越 100 时触发的特定心理转变表现。
 
-### 13. `tracker_prompt_context.js` (Tracker 提示词构造器)
+### 14. `tracker_prompt_context.js` (Tracker 提示词构造器)
 - **定位**：整合所有运行时信息用于构造发送给 Tracker 的 System Prompt。
 - **核心功能**：
   - 把 `state` 中的各个字段语义、`tools.js` 中所有工具的作用、各种族的详细生理限制等转化为高密度的 prompt 上下文，确保 AI 能做出极其精准的工具调用选择。
 
-### 14. `race_prompt_context.js` (种族名录提示词构造器)
+### 15. `race_prompt_context.js` (种族名录提示词构造器)
 - **定位**：将复杂的种族配置输出为对 AI 友好的中文名录提示词。
 - **核心功能**：
   - 拼装可用种族名录、衍生类型，给出各种混血写法指导，并在注册和追踪阶段分别使用简版或带辨识提示的详版。
 
-### 15. `embryo_prompt_context.js` (生殖体系补充 Lore 提示词构造器)
+### 16. `embryo_prompt_context.js` (生殖体系补充 Lore 提示词构造器)
 - **定位**：自动提取关联的胚胎类型 Lore 附带到 System Prompt 之后。
 - **核心功能**：
   - 解析当前角色和精液里的种族，有针对性地送入相应体系（例如“胎生”与“胎转卵生”的混合描述），防止 LLM 忽略小众妊娠阶段的物种特点。
 
-### 16. `registry_config.js` (注册引导常量)
+### 17. `registry_config.js` (注册引导常量)
 - **定位**：注册向导所使用的基础 Prompt 模板。
 
 ---
