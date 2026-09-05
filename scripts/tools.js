@@ -1,5 +1,8 @@
+import { sanitizeFetusTagList } from './fetus_tags.js';
 import {
   cloneValue,
+  createChildId,
+  getContextSafe,
   derivePregnancyStageState,
   getGestationEffectiveSpeed,
   getGestationSpeciesSpeed,
@@ -67,7 +70,8 @@ import {
 export const TOOL_DEFINITIONS = Object.freeze([
   {
     name: 'bsPassedTime',
-    description: '推进当前聊天中已注册角色的时间。会处理月经阶段、受精着床、孕期推进、产兆前驱、第一至第三产程、产后恢复，以及最近性行为计时。',
+    description: '推进当前聊天中所有已注册角色的时间（不是单一角色）。会处理月经阶段、受精着床、孕期推进、产兆前驱、第一至第三产程、产后恢复，以及最近性行为计时。'
+      + '各单位可同时给，会相加（如 day:1 与 hour:12 等于 1.5 天）。只能往前推：不给任何单位、或给负数都会被拒绝，时间无法倒退。',
     input_schema: {
       type: 'object',
       properties: {
@@ -97,7 +101,9 @@ export const TOOL_DEFINITIONS = Object.freeze([
   },
   {
     name: 'bsUpdateCharacterStatus',
-    description: '对单一角色的活力、情压、性欲、宫压做增减更新。会联动代谢累积、高潮排卵、羊膜耐久警告等状态。',
+    description: '对单一角色的活力、情压、性欲、宫压做增减更新。会联动代谢累积、高潮排卵、羊膜耐久警告等状态。'
+      + '四个数值传入的都是「变化量(delta)」而不是目标值：当前 vitality=80 传 -10 会变成 70，不是设为 -10。'
+      + '结果会被夹在该角色的上限内，上限随其 vitalityLevel／psyStressLevel 与妊娠状态而不同，可从 existing_state 的 *_interpret 与上限文字判断，不必自行计算。',
     input_schema: {
       type: 'object',
       properties: {
@@ -219,14 +225,16 @@ export const TOOL_DEFINITIONS = Object.freeze([
   },
   {
     name: 'bsSetCharacterPresence',
-    description: '设置角色是否在场。设为 false 后，tracker 默认不会再把该角色完整状态发送给 LLM，直到重新设为 true。',
+    description: '设置角色是否在场。设为 false 后，tracker 默认不会再把该角色完整状态发送给 LLM，直到重新设为 true。'
+      + 'isPresent 必须显式传 true 或 false，省略会被拒绝——默认成在场会让漏填变成静默改状态。'
+      + '若该角色正因胎内回归被冻结在别人体内，设为 true 会一并解除冻结、恢复其阶段推进。',
     input_schema: {
       type: 'object',
       properties: {
         female: { type: 'string' },
         isPresent: { type: 'boolean' },
       },
-      required: ['female'],
+      required: ['female', 'isPresent'],
       additionalProperties: false,
     },
   },
@@ -258,7 +266,9 @@ export const TOOL_DEFINITIONS = Object.freeze([
   },
   {
     name: 'bsNameChild',
-    description: '给单一角色已出生的某个孩子命名。只修改 children 指定索引的 name，不触发额外规则。',
+    description: '给单一角色已出生的某个孩子命名。只修改 children 指定索引的 name，不触发额外规则。'
+      + 'childIndex 从 0 起算，对应 existing_state 里 children 数组的下标；越界会被拒绝。'
+      + '注意介面与叙事惯常说的「第一个孩子」是 childIndex=0。',
     input_schema: {
       type: 'object',
       properties: {
@@ -341,7 +351,7 @@ export const TOOL_DEFINITIONS = Object.freeze([
   },
   {
     name: 'bsAddSperm',
-    description: '仅在人物 male 明确射精并射入人物 female 体内，且全程没有使用安全套等有效保护措施时，登记体内精液来源和受孕机会。仅插入、摩擦、体外射精、未射精、射在体外或使用任何有效保护措施都不得调用；此时不要更新精液。ejaculatedInside 与 protected 必须根据剧情明确填写，不能猜测。amount 是本次实际射入的精液量，必须为正数并按剧情实际量填写，不得用固定小数或凭空填 5；扣除/排出精液请用 bsDrainSperm。若同一工具批次随后调用 bsPassedTime，新射入量从该批次结算点开始计时，不会被该批次的时间推进重复衰减。race 使用 [derivedType-装饰子项]race-装饰子项 格式，混血种族以 X 分隔；父系 derivedType 直接从这个字符串解析。',
+    description: '仅在人物 male 明确射精并射入人物 female 体内，且全程没有使用安全套等有效保护措施时，登记体内精液来源和受孕机会。仅插入、摩擦、体外射精、未射精、射在体外或使用任何有效保护措施都不得调用；此时不要更新精液。ejaculatedInside 与 protected 必须根据剧情明确填写，不能猜测。amount 是本次实际射入的精液量，必须为正数并按剧情实际量填写，建议使用 10-30（残留每天自动衰减 10），不得用固定小数或凭空填 5；扣除/排出精液请用 bsDrainSperm。若同一工具批次随后调用 bsPassedTime，新射入量从该批次结算点开始计时，不会被该批次的时间推进重复衰减。race 使用 [derivedType-装饰子项]race-装饰子项 格式，混血种族以 X 分隔；父系 derivedType 直接从这个字符串解析。',
     input_schema: {
       type: 'object',
       properties: {
@@ -358,7 +368,7 @@ export const TOOL_DEFINITIONS = Object.freeze([
   },
   {
     name: 'bsDrainSperm',
-    description: '让角色主动排出体内部分或全部精液残留，按当前各来源比例一并减少。',
+    description: '让角色主动排出体内部分或全部精液残留，按当前各来源比例一并减少。用于角色主动清洗、灌洗或使用道具排出。注意：受精是在每次时间推进时用当下仍存在的精液判定，清空后这次性交不再有受孕机会——若剧情只是洗澡沐浴、角色并不打算避孕，不要调用本工具，残留本来就会自行衰减。',
     input_schema: {
       type: 'object',
       properties: {
@@ -371,7 +381,10 @@ export const TOOL_DEFINITIONS = Object.freeze([
   },
   {
     name: 'bsSetMenstrualPhases',
-    description: '直接设置月经相关阶段，用于催情、药物、外力或剧情推进。切到排卵期时会重新允许高潮排卵；假孕期可留精但不会排卵或受孕。不会覆盖正在进行的受精、真妊娠、产兆前驱或产程。',
+    description: '直接设置月经相关阶段，用于催情、药物、外力或剧情推进。'
+      + 'stage 只接受这几个值：卵泡期、排卵期、黄体期、月经期、产后恢复、假孕期；其他值（含妊娠阶段与回归期）一律拒绝，无法用本工具让角色怀孕或结束妊娠。'
+      + '切到排卵期时会重新允许高潮排卵；假孕期可留精但不会排卵或受孕。'
+      + '角色体内已有胎儿或受精进行中，或正处于真妊娠、回归期、产兆前驱、产程时，本工具会被拒绝，不会覆盖这些状态。',
     input_schema: {
       type: 'object',
       properties: {
@@ -421,7 +434,10 @@ export const TOOL_DEFINITIONS = Object.freeze([
   },
   {
     name: 'bsAbortion',
-    description: '终止当前受精或妊娠状态。月经阶段且着床前视为避孕成功，其他阶段视为流产；可指定 fetusIndex 做减胎。若 miscarriage 保护开启，则需 force=true 才会生效。',
+    description: '终止当前受精或妊娠状态。月经阶段且着床前视为避孕成功，其他阶段视为流产。'
+      + '可指定 fetusIndex 做减胎（只拿掉那一胎，其余继续）；fetusIndex 从 0 起算，越界会被拒绝——'
+      + '系统通知与介面说的「第 2 胎」对应 fetusIndex=1，不要直接照抄那个序号。省略 fetusIndex 则终止整个妊娠。'
+      + '若 miscarriage 保护开启，则需 force=true 才会生效。',
     input_schema: {
       type: 'object',
       properties: {
@@ -456,6 +472,37 @@ export const TOOL_DEFINITIONS = Object.freeze([
     },
   },
   {
+    name: 'bsWombReturn',
+    description: '胎内回归：让 returner 这个人回到 female 的子宫内成为其胎儿，经过一段过渡后转为正常妊娠，出生时是全新个体（新的孩子记录，与原来那个人不是同一笔资料）。'
+      + 'returner 可以是任何人：user、未注册的路人、或已注册角色都行，不必事先注册。'
+      + '未注册的 returner 请一并给 returnerRace 说明其种族；已注册角色可省略，系统会读她自己的种族。'
+      + 'returnerRace 使用 [derivedType-装饰子项]race-装饰子项 格式，混血以 X 分隔；两者都缺时视同与承载者同族。'
+      + '\n呼叫条件：承载者必须处于月经阶段（卵泡期/排卵期/黄体期/月经期）或无经期；她自己正在别人体内、或已在回归期时不可呼叫。'
+      + 'returner 若是已注册角色且已经在别人体内，也不可再次回归。不能让角色回归自己的子宫。'
+      + '呼叫时承载者子宫内已有的胎儿、残留精液与卵子会被直接净空。'
+      + '\n呼叫后承载者进入「回归期」：衣着压力冲到上限 10，体内多出一胎且胎重为上限 3.0，'
+      + '两者在 hours 小时内线性回落到正常，随后自动转入孕早期第一天，之后按一般妊娠推进。'
+      + 'hours 是故事内经过的时间，必须是不小于 0 的数字，要靠 bsPassedTime 推进才会流逝；'
+      + '传 0 表示瞬间完成（角色对这段过程无知觉），会当场结算进孕早期。回归期中不能植入其他胚胎。'
+      + '\n该胎的母方为承载者、父方为 returner，种族照常混血，并带 rebirth 标签。'
+      + 'returner 若是已注册角色，她的天赋会传给这一胎（技能不传），并且会被冻结：设为离场且停止一切阶段推进（她现在是一颗胎儿），'
+      + '期间对她使用生理类工具一律无效；用 bsSetCharacterPresence 将她设回在场即可解除冻结。未注册的 returner 没有冻结这回事。'
+      + '\n回归期不受子宫压力影响，不会因宫压过高而自然流产；只有明确呼叫 bsAbortion 才会中断。'
+      + '\n在回归期内呼叫 bsAbortion 代表回归者被消化吸收：她不会被排出，已注册的角色维持冻结、并入承载者体内，承载者回到卵泡期。'
+      + '一旦转入孕早期，这一胎就是正常胎儿，此后流产按一般流产处理。',
+    input_schema: {
+      type: 'object',
+      properties: {
+        female: { type: 'string' },
+        returner: { type: 'string' },
+        returnerRace: { type: 'string' },
+        hours: { type: 'number' },
+      },
+      required: ['female', 'returner'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'bsRuptureMembranes',
     description: '让角色破水（羊膜破裂）。只有在产兆前驱且宫压已达上限的 66%，或已在第一／第二产程时才会生效；条件不足会被拒绝，此时叙事不得写成已经破水。'
       + '产兆前驱破水会直接进入第一产程。剧情写到羊水流出、破水时必须调用本工具，让叙事与系统状态一致；系统未确认破水前不要擅自描写破水。',
@@ -470,7 +517,8 @@ export const TOOL_DEFINITIONS = Object.freeze([
   },
   {
     name: 'bsChildbirth',
-    description: '让角色立即结束分娩并进入产后恢复，并把剩余胎儿转为 children 记录。外部直接调用视为手术产；产程自然结束时则记为自然产。',
+    description: '让角色立即结束分娩并进入产后恢复，并把剩余胎儿转为 children 记录。外部直接调用视为手术产；产程自然结束时则记为自然产。'
+      + '只有角色已着床进入妊娠阶段（孕早期起，含产兆前驱与各产程）才能调用；月经阶段、着床前、回归期都会被拒绝，此时不得叙述成已经生产。',
     input_schema: {
       type: 'object',
       properties: {
@@ -531,11 +579,6 @@ function hasBreedingPsychology(profile) {
   const stageProfiles = profile?.psychology?.stageProfiles;
   return Boolean(stageProfiles && typeof stageProfiles === 'object' && !Array.isArray(stageProfiles)
     && Object.keys(stageProfiles).length > 0);
-}
-
-function findWardrobeItem(profile, itemRef, slot = '') {
-  const wardrobe = ensureWardrobeState(profile);
-  return resolveWardrobeItemRef(wardrobe.items, itemRef, slot);
 }
 
 function getAvailableOutfitItems(profile) {
@@ -603,6 +646,313 @@ function calculatePregWearPressure(profile) {
 // 产后恢复的衣着压力：从产后初期的水平随恢复进度线性递减到 0（体型回缩、乳胀消退）。
 const POSTPARTUM_START_WEAR_PRESSURE = 4;
 
+/**
+ * 胎内回归。一名已注册角色回到另一名角色子宫内成为胎儿，
+ * 经过一段过渡后转入正常妊娠，出生时是全新个体（新的 child id）。
+ *
+ * 之所以需要一个独立阶段而不是直接塞进孕早期：过渡期间胎重是上限 3.0
+ * （一个成人体积的东西刚进去），衣着压力顶到上限，两者都要随时间回落。
+ * 直接进孕早期的话，updateFetalEnergyDrain 会拿 3.0 的胎重去算供养力，
+ * 变成一场怪物妊娠。
+ */
+/**
+ * 工具参数里的人名允许直接写 ST 的 user 宏。这些名字会原样存进 sperms[*].male、
+ * fetuses[*].fathers、children[*].fathers，最后成为血缘图上的节点 id——
+ * 不解析的话族谱上会冒出一个叫「{{user}}」的人，而且同一个人写法不同就变成两个节点。
+ *
+ * 刻意只认完整的 user 别名，不跑 substituteParams：那会把任何含大括号的名字一起改写，
+ * 风险大于收益。
+ */
+const ST_USER_NAME_ALIASES = new Set(['user', '{user}', '{{user}}', '<user>']);
+const PERSON_NAME_ARG_KEYS = ['female', 'male', 'provider', 'fathers', 'returner'];
+
+function resolveUserAliasName(value) {
+  const raw = String(value ?? '').trim();
+  if (!raw || !ST_USER_NAME_ALIASES.has(raw.toLowerCase())) return null;
+  const userName = String(getContextSafe()?.name1 || '').trim();
+  return userName || null;
+}
+
+function resolvePersonNameField(value) {
+  if (typeof value !== 'string') return value;
+  const whole = resolveUserAliasName(value);
+  if (whole) return whole;
+  // 嵌合体的双父源写成 "A × B"。只按全角 × 拆——lineage 读取时也接受拉丁 x，
+  // 但拿它来改写会把 Max 这种名字切坏，宁可漏解析也不要毁掉名字。
+  if (!value.includes('×')) return value;
+  const parts = value.split('×');
+  let changed = false;
+  const next = parts.map((part) => {
+    const resolved = resolveUserAliasName(part);
+    if (resolved) { changed = true; return resolved; }
+    return part.trim();
+  });
+  return changed ? next.filter(Boolean).join(' × ') : value;
+}
+
+function resolvePersonNameArgs(args) {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return args;
+  let changed = false;
+  const next = { ...args };
+  for (const key of PERSON_NAME_ARG_KEYS) {
+    const resolved = resolvePersonNameField(next[key]);
+    if (resolved !== next[key]) {
+      next[key] = resolved;
+      changed = true;
+    }
+  }
+  return changed ? next : args;
+}
+
+/** 已经警告过的未知阶段，避免每次推进都刷一次 console */
+const reportedUnknownStages = new Set();
+
+const WOMB_RETURN_STAGE = '回归期';
+const WOMB_RETURN_PEAK_PRESSURE = 10;
+const WOMB_RETURN_PEAK_WEIGHT = 3.0;
+
+/** 承载者允许被回归的阶段：子宫得是空的（有东西会被净空），且不能正在妊娠或生产 */
+function canAcceptWombReturn(stage) {
+  return MENSTRUAL_STAGES.includes(stage) || stage === '无经期';
+}
+
+/** 这个角色现在是别人肚子里的一颗胎儿 */
+function getWombReturnHost(character) {
+  return String(character?.profile?.base?.wombReturnHost || '').trim();
+}
+
+/**
+ * 被冻结的角色不得再被生理类工具改动。冻结原本只挡住 bsPassedTime，
+ * 但 bsSetMenstrualPhases 之类照样能改她的阶段——一颗胎儿被设成排卵期，
+ * 而且她的阶段永远不会再推进，等于把状态锁在一个假值上。
+ */
+const WOMB_FROZEN_BLOCKED_TOOLS = new Set([
+  'bsSetMenstrualPhases',
+  'bsAddSperm',
+  'bsDrainSperm',
+  'bsImplantEmbryo',
+  'bsAbortion',
+  'bsChildbirth',
+  'bsRuptureMembranes',
+  'bsMaternalFetalInteraction',
+  'bsExcreteMetabolism',
+  'bsUpdatePsychology',
+]);
+
+function wombReturnProgress(state) {
+  const total = clampNumber(state?.totalHours, 0, 99999, 0);
+  if (total <= 0) return 1;
+  const remaining = clampNumber(state?.remainingHours, 0, 99999, 0);
+  return clampNumber(1 - (remaining / total), 0, 1, 1);
+}
+
+/** 过渡期间的胎重：3.0 线性回落到 1.0 */
+function applyWombReturnWeight(profile) {
+  const state = profile?.pregnant?.wombReturn;
+  const fetuses = Array.isArray(profile?.pregnant?.fetuses) ? profile.pregnant.fetuses : [];
+  const progress = wombReturnProgress(state);
+  const weight = WOMB_RETURN_PEAK_WEIGHT - ((WOMB_RETURN_PEAK_WEIGHT - 1) * progress);
+  for (const fetus of fetuses) {
+    if (!Array.isArray(fetus?.tags) || !fetus.tags.includes('rebirth')) continue;
+    fetus.weight = clampNumber(weight, 0.33, 3.0, 1.0);
+  }
+  updateFetalEnergyDrain(profile);
+}
+
+/**
+ * 结算回归期：转入孕早期。overflowDays 是超出回归期的那段时间，
+ * 带进妊娠而不是丢掉——否则一次推进 5 小时、回归期只剩 2 小时的话，
+ * 另外 3 小时会凭空消失。
+ */
+function finishWombReturn(profile, overflowDays, name, notify) {
+  const base = profile.base || {};
+  const pregnant = profile.pregnant || {};
+  const state = pregnant.wombReturn || {};
+  state.remainingHours = 0;
+  applyWombReturnWeight(profile);
+  delete pregnant.wombReturn;
+
+  // 孕早期第一天。不能从 0 起算——syncCharacterStageFromProfile 会把
+  // 「孕早期但孕龄 0」判定成尚未着床，直接把阶段弹回排卵期，回归结果就此消失。
+  // 也不套用正常受孕的产科偏移（约半个周期）：回归没有受精事件，
+  // 凭空多出两周孕龄会让它变成「孕早期第 14 天」，与「回归结束即第一天」矛盾。
+  const carried = Math.max(0, Number(overflowDays) || 0);
+  const speed = clampNumber(getGestationEffectiveSpeed(profile), 0, 20, 1);
+  const startDays = 1 + carried;
+  pregnant.pregnantDays = startDays;
+  pregnant.effectivePregnantDays = startDays * speed;
+  pregnant.amnionDurability = 100;
+  pregnant.fetusesCount = Array.isArray(pregnant.fetuses) ? pregnant.fetuses.length : 0;
+  base.stage = '孕早期';
+  base.days = startDays;
+  base.fertilizationDays = 0;
+  profile.experience = {
+    ...(profile.experience || {}),
+    pregnantExperience: clampNumber(profile?.experience?.pregnantExperience, 0, 999, 0) + 1,
+  };
+  refreshOutfitPregFit(profile);
+  updateFetalEnergyDrain(profile);
+  if (notify) notify.firstly = `${name}的回归期结束，进入了孕早期`;
+  return true;
+}
+
+/** 回归期的时间推进。回传是否已结算进孕早期 */
+function advanceWombReturn(profile, deltaDays, name, notify) {
+  const base = profile.base || {};
+  const pregnant = profile.pregnant || {};
+  const state = pregnant.wombReturn;
+  if (!state) return finishWombReturn(profile, 0, name, notify);
+
+  const remaining = clampNumber(state.remainingHours, 0, 99999, 0);
+  const passedHours = Math.max(0, Number(deltaDays) || 0) * 24;
+  if (passedHours < remaining) {
+    state.remainingHours = remaining - passedHours;
+    base.days = clampNumber(base.days, 0, 9999, 0) + deltaDays;
+    applyWombReturnWeight(profile);
+    refreshOutfitPregFit(profile);
+    return false;
+  }
+  return finishWombReturn(profile, (passedHours - remaining) / 24, name, notify);
+}
+
+function applyWombReturn(chatState, args) {
+  const female = String(args?.female || '').trim();
+  const returnerName = String(args?.returner || '').trim();
+  const character = chatState.characters?.[female];
+  if (!female || !character) {
+    return { applied: false, message: `bsWombReturn skipped: unknown character ${female || '(empty)'}.` };
+  }
+  if (!returnerName) {
+    return { applied: false, message: `bsWombReturn skipped for ${female}: returner 不可为空。` };
+  }
+  // returner 不必是已注册角色。常态其实是 user 被吞、或吞一个路人——
+  // 两者都不在 characters 里；硬性要求注册会把最常见的用法挡在门外。
+  const returner = chatState.characters?.[returnerName] || null;
+  // 钻进自己的子宫在物理上说不通，而且母父同一人会被标成自交
+  if (returnerName === female) {
+    return { applied: false, message: `bsWombReturn skipped for ${female}: 角色不能回归自己的子宫。` };
+  }
+  // 承载者自己是别人肚子里的胎儿：她的阶段永远不会推进，回归期会卡死在里面
+  const hostFrozenIn = getWombReturnHost(character);
+  if (hostFrozenIn) {
+    return {
+      applied: false,
+      message: `bsWombReturn skipped for ${female}: 她本人正在 ${hostFrozenIn} 体内作为胎儿，不能同时作为承载者。`,
+    };
+  }
+  // 一个人不能同时是两个人肚子里的胎儿（只有已注册角色才追踪得到这件事）
+  const returnerFrozenIn = returner ? getWombReturnHost(returner) : '';
+  if (returnerFrozenIn) {
+    return {
+      applied: false,
+      message: `bsWombReturn skipped for ${female}: ${returnerName} 已经在 ${returnerFrozenIn} 体内，不能重复回归。`,
+    };
+  }
+  const stage = String(character?.profile?.base?.stage || '');
+  if (stage === WOMB_RETURN_STAGE) {
+    return { applied: false, message: `bsWombReturn skipped for ${female}: 已经在回归期，不能重复回归。` };
+  }
+  if (!canAcceptWombReturn(stage)) {
+    return {
+      applied: false,
+      message: `bsWombReturn skipped for ${female}: 当前阶段为 ${stage || '未知'}，只有月经阶段或无经期才能接受胎内回归。`,
+    };
+  }
+
+  const next = cloneValue(character);
+  const profile = next.profile || {};
+  const base = profile.base || {};
+  const pregnant = profile.pregnant || {};
+
+  // 子宫直接净空：残留精液不清的话，回归期结束进孕早期时会再受精一次，
+  // 变成「回归胎 + 野生胎」的双胞胎
+  base.sperms = [];
+  base.eggs = 0;
+  base.fertilizationDays = 0;
+  pregnant.fetuses = [];
+  pregnant.fetusesCount = 0;
+  pregnant.fetalEnergyDrain = 0;
+
+  const returnerProfile = returner?.profile || {};
+  const returnerBase = returnerProfile.base || {};
+  const motherRace = parseRaceDescriptor(base.race || '人类').race || '人类';
+  // 种族来源依序：显式传入 > 已注册角色自己的种族 > 与承载者同族
+  const explicitRace = String(args?.returnerRace || '').trim();
+  const parsedReturner = explicitRace ? parseRaceDescriptor(explicitRace) : null;
+  const fatherRace = parsedReturner?.race
+    || parseRaceDescriptor(returnerBase.race || motherRace).race
+    || motherRace;
+  const fetusRace = deriveFetusRace(motherRace, fatherRace);
+  const fatherDerivedType = parsedReturner?.derivedType
+    || (returnerBase.derivedType ? String(returnerBase.derivedType) : null);
+  const derivedSeed = getDerivedTypeSeed(base.derivedType ? String(base.derivedType) : null, fatherDerivedType);
+
+  pregnant.fetuses = [{
+    embryoId: 1,
+    fusionCheckedWith: [],
+    tags: ['rebirth'],
+    fathers: returnerName,
+    provider: null,
+    providerSources: [],
+    race: fetusRace,
+    fatherRace,
+    fatherDerivedType,
+    gender: deriveFetusGender(fetusRace),
+    embryoType: deriveFetusEmbryoType(fetusRace),
+    // 刚进去时是一个成人的体积，之后随回归期线性回落到 1.0
+    weight: WOMB_RETURN_PEAK_WEIGHT,
+    tendencyAngle: randomInt(0, 360),
+    affinity: derivedSeed.affinity,
+    maternalDerivedTypeProgress: derivedSeed.progress,
+    // 天赋跟着回归者走，技能不传：身体是新的，资质是旧的
+    talents: normalizeTalentList(returnerProfile.talents),
+  }];
+  pregnant.fetusesCount = 1;
+
+  // 不能静默把垃圾值当成 0：那会让「传错参数」变成「瞬间完成回归」，
+  // 与本档其他工具要求显式传值的做法一致
+  const rawHours = args?.hours === undefined || args?.hours === null ? 0 : Number(args.hours);
+  if (!Number.isFinite(rawHours) || rawHours < 0) {
+    return { applied: false, message: `bsWombReturn skipped for ${female}: hours 必须是不小于 0 的数字。` };
+  }
+  const hours = clampNumber(rawHours, 0, 99999, 0);
+  pregnant.wombReturn = { returner: returnerName, totalHours: hours, remainingHours: hours };
+  base.stage = WOMB_RETURN_STAGE;
+  base.days = 0;
+  profile.base = base;
+  profile.pregnant = pregnant;
+  next.profile = profile;
+
+  const notify = profile.notify || {};
+  if (hours <= 0) {
+    // 瞬间完成：当场结算进孕早期，否则阶段会停在「回归期、剩 0 小时」，
+    // 要等下一次 bsPassedTime 才翻页
+    finishWombReturn(profile, 0, female, notify);
+  } else {
+    applyWombReturnWeight(profile);
+    refreshOutfitPregFit(profile);
+    notify.firstly = `${returnerName}回到了${female}的子宫内`;
+  }
+  profile.notify = notify;
+  chatState.characters[female] = next;
+
+  // 只有已注册角色需要冻结；未注册的 returner 本来就不在系统里跑
+  if (returner) {
+    const frozen = cloneValue(returner);
+    frozen.profile = frozen.profile || {};
+    frozen.profile.base = { ...(frozen.profile.base || {}), isHere: false, wombReturnHost: female };
+    chatState.characters[returnerName] = frozen;
+  }
+
+  return {
+    applied: true,
+    message: `bsWombReturn applied: ${returnerName} returned into ${female}`
+      + `${hours > 0 ? ` for ${hours}h` : ' instantly'}`
+      + `${returner ? `; ${returnerName} frozen.` : '; returner is unregistered, nothing frozen.'}`,
+  };
+}
+
+
 function calculatePostpartumWearPressure(profile) {
   const days = clampNumber(profile?.base?.days, 0, 9999, 0);
   const recoveryDays = getStageLimit(profile, '产后恢复') || 56;
@@ -610,17 +960,34 @@ function calculatePostpartumWearPressure(profile) {
   return clampNumber(POSTPARTUM_START_WEAR_PRESSURE * (1 - progress), 0, 10, 0);
 }
 
+/**
+ * 回归期的衣着压力：一个成人体积的东西刚进去，压力直接顶到上限，
+ * 再随剩余时间线性回落。不能走 calculatePregWearPressure——那个是从
+ * effectivePregnantDays 与 fetalEnergyDrain 推的，回归期两者都是 0，
+ * 算出来只有 0.5，与「压力直接爆」完全相反。
+ */
+function calculateWombReturnWearPressure(profile) {
+  const state = profile?.pregnant?.wombReturn;
+  const total = clampNumber(state?.totalHours, 0, 99999, 0);
+  if (total <= 0) return 0;
+  const remaining = clampNumber(state?.remainingHours, 0, 99999, 0);
+  return clampNumber(WOMB_RETURN_PEAK_PRESSURE * (remaining / total), 0, 10, 0);
+}
+
 function refreshOutfitPregFit(profile) {
   if (!profile?.wardrobe?.enabled) return null;
   const outfit = ensureOutfitState(profile);
   const stage = String(profile?.base?.stage || '');
   const inPostpartum = stage === '产后恢复';
-  if (!inPostpartum && !isTruePregnancyStage(stage) && stage !== '产兆前驱' && !LABOR_STAGES.includes(stage)) {
+  const inWombReturn = stage === WOMB_RETURN_STAGE;
+  if (!inPostpartum && !inWombReturn && !isTruePregnancyStage(stage) && stage !== '产兆前驱' && !LABOR_STAGES.includes(stage)) {
     outfit.pregFit = null;
     return outfit;
   }
   const totals = getOutfitDimensionTotals(profile);
-  const pregWearPressure = inPostpartum ? calculatePostpartumWearPressure(profile) : calculatePregWearPressure(profile);
+  const pregWearPressure = inWombReturn
+    ? calculateWombReturnWearPressure(profile)
+    : (inPostpartum ? calculatePostpartumWearPressure(profile) : calculatePregWearPressure(profile));
   outfit.pregFit = {
     pregWearPressure,
     gap: {
@@ -686,10 +1053,6 @@ function shuffleInPlace(list) {
   }
 }
 
-function getBaseRace(race) {
-  return getBaseRaceName(race);
-}
-
 function getRaceComponents(race) {
   return getConfiguredRaceComponents(race);
 }
@@ -740,6 +1103,124 @@ function getConceptionWeight(stage, gender, weightRatio = 1.0) {
   const fluctuation = Math.exp(randomNumber(-0.083, 0.083));
   const sexMultiplier = gender === '男' ? 1.05 : gender === '女' ? 1 / 1.05 : 1.0;
   return Math.max(0.33, Math.min(3.0, Number(baseWeight * fluctuation * sexMultiplier * weightRatio)));
+}
+
+/**
+ * 异期复孕：已在妊娠中再次受精，两胎孕龄不同步。
+ *
+ * 孕龄在这个引擎里是 pregnant.effectivePregnantDays 这一个共用数字（被引用 30 处，
+ * 驱动阶段、产程、代谢、逾期）。不去动它，改成每胎存一个「受精当下的共用时钟读数」，
+ * 该胎自己的年龄 = 共用时钟 − 该读数。阶段仍由共用时钟（＝最早那胎）驱动，
+ * 这也是对的：母体的身体状态取决于最成熟的那一胎。
+ *
+ * 有效孕日对所有物种都是 0-280 的同一把尺（累加时乘妊娠速度，阶段门槛用固定值），
+ * 所以下面这些天数不必再乘物种项。
+ */
+const SUPERFETATION_STAGE = '孕早期';
+const SUPERFETATION_FULL_TERM_DAYS = 280;
+/** 孕早期长度，也就是可以再受精的原始视窗。从阶段表推导，别再写死一次 */
+const SUPERFETATION_RAW_WINDOW_DAYS = Number(PREGNANCY_STAGE_DAYS['孕早期']) || 84;
+/** 孕期受精的机率系数：正常受孕几乎是每天 80%，不压低的话异期会变成常态 */
+const SUPERFETATION_CHANCE_FACTOR = 0.10;
+/**
+ * 揭晓时机：孕中期一开始，也就是孕早期结束的那一刻。
+ * 在此之前模型与追踪页都看不到这一胎。
+ * 这同时也是待著床胚胎被清除的时点——到了孕中期，没著床的没了，
+ * 著床了的当场揭晓，不会有「已经存在却还藏着」的中间地带。
+ */
+const SUPERFETATION_REVEAL_DAYS = SUPERFETATION_RAW_WINDOW_DAYS;
+
+/**
+ * 孕中孕：异期受精的那一颗落进另一颗胎儿体内，成为胎中胎。
+ *
+ * 走的是同一条高潮排卵的异期受精路径，额外三个条件同时成立才会变成孕中孕。
+ * 三个都是硬筛子，不必再加机率系数：
+ *  - 视窗 8-12 周（有效孕日 56-84），比异期本身更窄
+ *  - 宿主胎儿的胎重 >= 1.5。典型胎重 0.95，孕期受精上限 1.83，
+ *    要父系种族支配度接近满才碰得到
+ *  - 子宫内精液总量 > 100。bsAddSperm 建议单次 10-30、每天衰减 10，
+ *    要短时间内多次性交才堆得起来
+ */
+const NESTED_WINDOW_MIN_DAYS = 56;
+const NESTED_HOST_MIN_WEIGHT = 1.5;
+const NESTED_MIN_SPERM = 100;
+/** 揭晓时机比一般异期胎晚得多：要到孕晚期才看得到 */
+const NESTED_REVEAL_DAYS = SUPERFETATION_RAW_WINDOW_DAYS + (Number(PREGNANCY_STAGE_DAYS['孕中期']) || 105);
+
+/**
+ * 挑一颗够大的胎儿当宿主：取最重的，同重时优先女胎。
+ * 只挑已著床的——待著床的胚胎自己都还没安顿好。
+ */
+function pickNestedHostFetus(profile) {
+  const candidates = getImplantedFetuses(profile)
+    .filter((fetus) => clampNumber(fetus?.weight, 0.33, 3.0, 1.0) >= NESTED_HOST_MIN_WEIGHT);
+  if (candidates.length === 0) return null;
+  return candidates.reduce((best, fetus) => {
+    const bestWeight = clampNumber(best?.weight, 0.33, 3.0, 1.0);
+    const weight = clampNumber(fetus?.weight, 0.33, 3.0, 1.0);
+    if (weight > bestWeight) return fetus;
+    if (weight < bestWeight) return best;
+    // 同重时优先女胎
+    if (fetus?.gender === '女' && best?.gender !== '女') return fetus;
+    return best;
+  });
+}
+
+/**
+ * 受精视窗上限。不是整个孕早期——着床要花 getImplantationDays 个真实日，
+ * 视窗末尾受精的胚胎会来不及着床就撞上孕中期的强制清除，形成一段
+ * 「受精看似成功、实则注定作废」的死区。把视窗提前关闭，死区由构造上消失。
+ * 妊娠速度极快的物种可能算出负值，那就是该物种不可能异期复孕。
+ */
+function getSuperfetationWindowDays(profile) {
+  const speed = clampNumber(getGestationEffectiveSpeed(profile), 0.1, 20, 1);
+  return Math.max(0, SUPERFETATION_RAW_WINDOW_DAYS - (getImplantationDays(profile) * speed));
+}
+
+/** 这一胎自己的有效孕龄。既有胎儿没有 conceivedAtDays，视为 0 */
+function getFetusEffectiveAge(pregnant, fetus) {
+  const shared = clampNumber(pregnant?.effectivePregnantDays, 0, 9999, 0);
+  const conceivedAt = clampNumber(fetus?.conceivedAtDays, 0, 9999, 0);
+  return Math.max(0, shared - conceivedAt);
+}
+
+/**
+ * 已着床的胎儿。没有 pendingImplantation 旗标＝已着床，
+ * 所以存量存档不必迁移。随机挑胎、胎教、母胎互动都只能挑这些。
+ */
+/**
+ * 这一胎是否已经被角色本人知道。异期胎在揭晓（妊娠期一半）之前，
+ * 提示词投影与追踪页都看不到它——它在状态里照常存在、照常发育、照常吃供养力，
+ * 所以模型会看到「负担莫名偏高」，那是伏笔而不是穿帮。完整变量页仍然看得到。
+ */
+export function isFetusKnownToCharacter(fetus) {
+  if (!fetus || typeof fetus !== 'object') return false;
+  if (fetus.pendingImplantation) return false;
+  if (!fetus.conceivedAtDays) return true;
+  return Boolean(fetus.revealed);
+}
+
+function isImplantedFetus(fetus) {
+  return Boolean(fetus) && !fetus.pendingImplantation;
+}
+
+function getImplantedFetuses(profile) {
+  const fetuses = Array.isArray(profile?.pregnant?.fetuses) ? profile.pregnant.fetuses : [];
+  return fetuses.filter(isImplantedFetus);
+}
+
+/**
+ * 从已着床的胎儿里随机挑一个，回传它在原阵列里的索引；没有可挑的回 -1。
+ * 不能改成先过滤再挑——胎教与母胎互动最后都会 pregnant.fetuses = fetuses
+ * 整批写回，过滤过的阵列会把待著床的胚胎直接删掉。
+ */
+function pickImplantedFetusIndex(fetuses) {
+  const eligible = [];
+  for (let index = 0; index < fetuses.length; index += 1) {
+    if (isImplantedFetus(fetuses[index])) eligible.push(index);
+  }
+  if (eligible.length === 0) return -1;
+  return eligible[randomInt(0, eligible.length - 1)];
 }
 
 function getConceptionWeightRatio(profile, sperm) {
@@ -906,6 +1387,8 @@ function createChimeraFetus(profile, carrierName, fetusA, fetusB, embryoId) {
   return {
     embryoId,
     fusionCheckedWith: [],
+    // 嵌合本身由 chimera 栏位推导，这里只承接两边已落盘的标签
+    tags: sanitizeFetusTagList([...(fetusA?.tags || []), ...(fetusB?.tags || [])]),
     fathers: fathers.join(' × ') || '未知',
     provider: providerSources.length === 0 ? null : providerSources.join(' × '),
     providerSources,
@@ -932,7 +1415,8 @@ function applyChimeraFusion(profile, carrierName) {
   const fetuses = ensureEmbryoMetadata(pregnant);
   if (clampNumber(profile?.base?.fertilizationDays, 0, 9999, 0) <= 1 || fetuses.length < 2) return;
 
-  const candidates = fetuses.filter((fetus) => !fetus?.chimera);
+  // 待著床的异期胚胎不与已著床的胎儿配对：三个月大的胎儿与新受精卵融合说不通
+  const candidates = fetuses.filter((fetus) => !fetus?.chimera && !fetus?.pendingImplantation);
   const pairs = [];
   for (let left = 0; left < candidates.length; left += 1) {
     for (let right = left + 1; right < candidates.length; right += 1) {
@@ -972,14 +1456,24 @@ function resolvePendingChimeraGenders(fetuses) {
   }
 }
 
-function applyIdenticalSplit(profile) {
+/**
+ * @param batch 只对这一批胚胎掷分裂骰；省略＝全部。
+ *   异期复孕时新胚胎著床会再跑一次这个函式，不限定批次的话，
+ *   已经三个月大的先来那胎会被重新掷一次分裂骰，可能凭空变成双胞胎。
+ */
+function applyIdenticalSplit(profile, batch = null) {
   const pregnant = profile.pregnant || {};
   const fetuses = ensureEmbryoMetadata(pregnant);
   if (fetuses.length === 0) return;
+  const targets = batch ? new Set(batch) : null;
 
   const result = [];
   let nextId = getNextEmbryoId(fetuses);
   for (const baseFetus of fetuses) {
+    if (targets && !targets.has(baseFetus)) {
+      result.push(baseFetus);
+      continue;
+    }
     result.push(baseFetus);
     const physiology = getMergedRacePhysiologyProfile(baseFetus?.race);
     const splitRate = clampNumber(
@@ -996,9 +1490,16 @@ function applyIdenticalSplit(profile) {
         if (Math.random() < splitRate * splitRate * splitRate) targetCount = 4;
       }
     }
+    // 分裂发生时才标记：复制体在栏位上与原胚一模一样，事后无从分辨谁跟谁同卵，
+    // 只能在这一刻把整组打上 identical 与共用的 identicalGroup
+    if (targetCount > 1) {
+      baseFetus.identicalGroup = baseFetus.embryoId;
+      baseFetus.tags = sanitizeFetusTagList([...(baseFetus.tags || []), 'identical']);
+    }
     while (targetCount > 1) {
       const clone = cloneIdenticalFetus(baseFetus);
       clone.embryoId = nextId;
+      clone.identicalGroup = baseFetus.identicalGroup;
       nextId += 1;
       result.push(clone);
       targetCount -= 1;
@@ -1026,6 +1527,8 @@ function createSimpleFetus(profile, sperm, cycleStage, options = {}) {
   return {
     embryoId: null,
     fusionCheckedWith: [],
+    // 嵌合／代孕／自交都能从既有栏位推导，不写进来；这里只留给推导不出来的标签
+    tags: [],
     fathers: String(sperm?.male || '未知'),
     // 自然受精恒为 null；代孕／注卵由植入工具指定归属
     provider: options.provider ? String(options.provider) : null,
@@ -1048,7 +1551,10 @@ function updateFetalEnergyDrain(profile) {
   const motherBreedTolerance = clampNumber(profile?.bio?.breedTolerance, 0.1, 100, 1.0);
   profile.pregnant.fetalEnergyDrain = fetuses.reduce((sum, fetus) => {
     const weight = clampNumber(fetus?.weight, 0.33, 3.0, 1.0);
-    const ageInDays = effectivePregnantDays * weight;
+    // 每胎用自己的孕龄：异期复孕时晚到那胎不该按先来者的进度计算负担。
+    // 既有胎儿没有 conceivedAtDays，算出来就是共用时钟，行为不变。
+    const ownAge = Math.max(0, effectivePregnantDays - clampNumber(fetus?.conceivedAtDays, 0, 9999, 0));
+    const ageInDays = ownAge * weight;
     const fetalAgeWeeks = ageInDays / 7;
     const fetalLoad = fetalAgeWeeks / 40;
     const fetusEnergyDrain = fetalLoad / motherBreedTolerance;
@@ -1342,12 +1848,16 @@ function updateFetalPositions(profile, tick, female) {
             });
           }
         }
+        // 按身分移除，不能用收集当时的 index：每搬动一胎阵列就位移一次，
+        // 后面那些 entry.index 全部失效。用旧索引会删掉别人再把自己插回去，
+        // 结果是一胎被消灭、另一胎被复制两份（双胞胎的父方、种族、性别、标签
+        // 就此互相覆盖，连族谱一起错）。
         for (const entry of oblique) {
-          if (Math.random() < entry.rate) {
-            fetuses.splice(entry.index, 1);
-            const newIndex = randomInt(0, fetuses.length);
-            fetuses.splice(newIndex, 0, entry.fetus);
-          }
+          if (Math.random() >= entry.rate) continue;
+          const currentIndex = fetuses.indexOf(entry.fetus);
+          if (currentIndex < 0) continue;
+          fetuses.splice(currentIndex, 1);
+          fetuses.splice(randomInt(0, fetuses.length), 0, entry.fetus);
         }
       } else if (stage === '临产期') {
         const total = fetuses.reduce((sum, fetus) => sum + clampNumber(fetus?.weight, 0.33, 3.0, 1.0), 0);
@@ -1453,7 +1963,26 @@ export function syncManualMenstrualStageTransition(character, previousStage = ''
   const nextStage = String(base.stage || '');
   if (nextStage !== '排卵期' || String(previousStage || '') === nextStage) return character;
 
-  base.conceptionCandidates = [];
+  // 手动把状态切到排卵期时，残留精液也应像自然时间推进一样形成候选快照。
+  // 候选池独立于 sperm 原始数组，避免后续精液衰减改变本轮竞争权重。
+  const candidateByMale = new Map();
+  for (const sperm of Array.isArray(base.sperms) ? base.sperms : []) {
+    const male = String(sperm?.male || '').trim();
+    const value = clampNumber(sperm?.value, 0, 9999, 0);
+    if (!male || value <= 0) continue;
+    const existing = candidateByMale.get(male);
+    if (existing) {
+      existing.competitionWeight += value;
+      continue;
+    }
+    candidateByMale.set(male, {
+      male,
+      race: String(sperm?.race || '人类').trim() || '人类',
+      derivedType: sperm?.derivedType ? String(sperm.derivedType).trim() : null,
+      competitionWeight: value,
+    });
+  }
+  base.conceptionCandidates = [...candidateByMale.values()];
   profile.cooldown = {
     ...(profile.cooldown || {}),
     naturalOvulationUsed: false,
@@ -1516,6 +2045,162 @@ function resolveNaturalConception(profile, stage, eggs) {
   return resolvedCount;
 }
 
+/**
+ * 一次受精判定。回传剩余卵数。
+ * chanceFactor 供异期复孕压低机率；superfetation 时另外标记新胚胎。
+ */
+function attemptFertilization(profile, { deltaDays, stage, name, notify, chanceFactor = 1, superfetation = false }) {
+  const base = profile.base || {};
+  const pregnant = profile.pregnant || {};
+  const sperms = Array.isArray(base.sperms) ? base.sperms.map((item) => ({ ...item })) : [];
+  const availableSperms = sperms.filter((item) => clampNumber(item?.value, 0, 999999, 0) > 0);
+  let eggs = clampNumber(base.eggs, 0, 99, 0);
+  const femaleDifficulty = clampNumber(profile?.bio?.impregnationDifficulty, 0.1, 100, 1.0);
+
+  while (eggs > 0 && availableSperms.length > 0) {
+    const totalSperm = availableSperms.reduce((sum, item) => sum + clampNumber(item?.value, 0, 999999, 0), 0);
+    let winner = null;
+    for (const sperm of availableSperms) {
+      const share = totalSperm > 0 ? clampNumber(sperm?.value, 0, 999999, 0) / totalSperm : 0;
+      const maleDifficulty = clampNumber(getMergedRacePhysiologyProfile(sperm?.race)?.impregnationDifficulty, 0.1, 100, 1.0);
+      const isSameRace = isSameRaceGroup(profile?.base?.race, sperm?.race);
+      let effectiveDifficulty = isSameRace ? femaleDifficulty : (femaleDifficulty + maleDifficulty);
+      const femaleEmbryoType = deriveFetusEmbryoType(profile?.base?.race);
+      const maleEmbryoType = deriveFetusEmbryoType(sperm?.race);
+      if (femaleEmbryoType !== maleEmbryoType) effectiveDifficulty *= 1.5;
+      const spermBaseChance = Math.max(0.001, Math.min(0.8, (deltaDays * 12 * 0.5) / effectiveDifficulty));
+      const spermChance = Math.max(0, Math.min(0.8, spermBaseChance * share * chanceFactor));
+      if (spermChance > 0 && Math.random() <= spermChance) {
+        winner = sperm;
+        break;
+      }
+    }
+    if (winner) {
+      pregnant.fetuses = Array.isArray(pregnant.fetuses) ? pregnant.fetuses : [];
+      const fetus = createSimpleFetus(profile, winner, stage);
+      // 孕中孕：异期受精成立之后，再看三个额外条件同时成不成立
+      const conceivedAt = clampNumber(pregnant.effectivePregnantDays, 0, 9999, 0);
+      const nestedHost = superfetation
+        && conceivedAt >= NESTED_WINDOW_MIN_DAYS
+        && totalSperm > NESTED_MIN_SPERM
+        ? pickNestedHostFetus(profile)
+        : null;
+      if (nestedHost) markNestedFetus(profile, fetus, nestedHost);
+      else if (superfetation) markSuperfetationFetus(profile, fetus);
+      pregnant.fetuses.push(fetus);
+      notify.secondly = nestedHost
+        ? `${name}体内的一胎之中又结出了新的受精卵`
+        : (superfetation ? `${name}在妊娠中再度受精` : `${name}受精成功`);
+      eggs -= 1;
+    }
+    break;
+  }
+  return eggs;
+}
+
+/**
+ * 把新胚胎标成异期胎：记下受精当下的共用时钟、标为待着床、按落后进度打胎重折扣。
+ *
+ * 胎重折扣取 (1 − 落后 / 280)²。平方是因为生长亏损是复利而不是等差：
+ * 线性版本在视窗上限只掉到 0.70，平方版本落到 0.49，符合「落后一整个孕早期
+ * 大约只有一半重」的直觉。这是乘在 getConceptionWeight 既有的四个乘数之上，
+ * 种族混血偏移（weightRatio）照常生效；两者都不利时会撞到 0.33 的地板。
+ */
+function markSuperfetationFetus(profile, fetus) {
+  const pregnant = profile.pregnant || {};
+  const conceivedAt = clampNumber(pregnant.effectivePregnantDays, 0, 9999, 0);
+  const lag = Math.min(conceivedAt / SUPERFETATION_FULL_TERM_DAYS, 1);
+  fetus.conceivedAtDays = conceivedAt;
+  fetus.pendingImplantation = true;
+  fetus.tags = sanitizeFetusTagList([...(fetus.tags || []), 'superfetation']);
+  fetus.weight = clampNumber(fetus.weight * ((1 - lag) ** 2), 0.33, 3.0, 1.0);
+}
+
+/**
+ * 待着床的异期胚胎。刻意不重用一般的着床区块——那一段成功时会把阶段设成孕早期、
+ * 重设两个孕龄时钟、重置羊膜耐久、并多记一次怀孕经验，等于把先来那胎的妊娠整个洗掉；
+ * 失败时更会 pregnant.fetuses = [] 把既有胎儿一起清空。
+ *
+ * 这里只做属于新胚胎自己的事：倒数、着床成败、分裂与融合都只作用於本批。
+ */
+/**
+ * 异期胎的揭晓。在此之前它在状态里照常存在、照常发育，只是提示词投影与追踪页
+ * 都看不到它——角色本人还不知道自己怀了两胎。隐藏期间它仍然吃供养力，
+ * 所以模型会看到「负担莫名偏高」，那是伏笔而不是穿帮。
+ */
+function revealSuperfetationFetuses(profile, name, notify, { force = false } = {}) {
+  const pregnant = profile.pregnant || {};
+  const fetuses = Array.isArray(pregnant.fetuses) ? pregnant.fetuses : [];
+  const shared = clampNumber(pregnant.effectivePregnantDays, 0, 9999, 0);
+  let revealed = 0;
+  for (const fetus of fetuses) {
+    if (!fetus?.conceivedAtDays || fetus.revealed || fetus.pendingImplantation) continue;
+    // 孕中孕藏得比一般异期胎久：要到孕晚期才看得到
+    const threshold = fetus.nestedInEmbryoId ? NESTED_REVEAL_DAYS : SUPERFETATION_REVEAL_DAYS;
+    if (!force && shared < threshold) continue;
+    fetus.revealed = true;
+    revealed += 1;
+  }
+  if (revealed > 0 && notify) {
+    notify.firstly = `${name}被检查出体内另有 ${revealed} 胎，孕龄与先来者并不一致`;
+  }
+  return revealed > 0;
+}
+
+function processSuperfetationImplantation(profile, tick, notify, name) {
+  const base = profile.base || {};
+  const pregnant = profile.pregnant || {};
+  const stage = String(base.stage || '');
+  if (!isTruePregnancyStage(stage)) return;
+  const fetuses = Array.isArray(pregnant.fetuses) ? pregnant.fetuses : [];
+  const pending = fetuses.filter((fetus) => fetus?.pendingImplantation);
+  if (pending.length === 0) return;
+
+  // 还没着床就撞上孕中期：一律清掉。着床太晚本来就该失败，
+  // 也顺带保证不会有未着床的胚胎活到分娩变成孩子。
+  if (stage !== SUPERFETATION_STAGE) {
+    pregnant.fetuses = fetuses.filter((fetus) => !fetus?.pendingImplantation);
+    pregnant.fetusesCount = pregnant.fetuses.length;
+    base.fertilizationDays = 0;
+    notify.secondly = `${name}体内新的受精卵未能著床`;
+    updateFetalEnergyDrain(profile);
+    return;
+  }
+
+  // 妊娠期间 base.fertilizationDays 是闲置的（一般着床区块两条分支都要求
+  // !isPregnancyStage），借来当这一批的倒数
+  base.fertilizationDays = clampNumber(base.fertilizationDays, 0, 9999, 0) + tick.deltaDays;
+  if (base.fertilizationDays < getImplantationDays(profile)) return;
+
+  const vitality = clampNumber(base.vitality, 0, 200, 100);
+  const implantationFailChance = vitality < 100 ? (100 - vitality) / 100 : 0;
+  base.fertilizationDays = 0;
+  if (Math.random() < implantationFailChance) {
+    // 只移除本批，先来那胎不受影响
+    pregnant.fetuses = fetuses.filter((fetus) => !fetus?.pendingImplantation);
+    pregnant.fetusesCount = pregnant.fetuses.length;
+    notify.secondly = `${name}体内新的受精卵著床失败`;
+    updateFetalEnergyDrain(profile);
+    return;
+  }
+
+  for (const fetus of pending) delete fetus.pendingImplantation;
+  applyIdenticalSplit(profile, pending);
+  resolvePendingChimeraGenders(pending);
+  pregnant.fetusesCount = Array.isArray(pregnant.fetuses) ? pregnant.fetuses.length : 0;
+  updateFetalEnergyDrain(profile);
+}
+
+/**
+ * 把新胚胎标成孕中孕：母方是宿主胎儿（用 embryoId 指过去，出生后再解析成孩子 id），
+ * 父方照常是精源。它同时也是异期胎，所以两个标签都带。
+ */
+function markNestedFetus(profile, fetus, host) {
+  markSuperfetationFetus(profile, fetus);
+  fetus.nestedInEmbryoId = host.embryoId;
+  fetus.tags = sanitizeFetusTagList([...(fetus.tags || []), 'nested']);
+}
+
 function processSimpleConception(profile, tick, notify, name, options = {}) {
   const base = profile.base || {};
   const pregnant = profile.pregnant || {};
@@ -1545,7 +2230,23 @@ function processSimpleConception(profile, tick, notify, name, options = {}) {
       const resolvedCount = resolveNaturalConception(profile, stage, clampNumber(base.eggs, 0, 99, 0));
       if (resolvedCount > 0) notify.secondly = `${name}受精成功`;
     }
+  } else if (stage === SUPERFETATION_STAGE) {
+    // 异期复孕。卵不是这里排的——高潮排卵本来就不挡妊娠，而孕期中卵子既不衰减
+    // 也不清除，所以「这个周期没用掉的排卵留到孕早期」是现成行为，不必新增。
+    // 这里只把受精那一步的闸门打开，并按进度压低机率：越晚越难，视窗末端归零。
+    const windowDays = getSuperfetationWindowDays(profile);
+    const conceivedAt = clampNumber(pregnant.effectivePregnantDays, 0, 9999, 0);
+    if (windowDays > 0 && conceivedAt < windowDays) {
+      const decay = 1 - (conceivedAt / windowDays);
+      base.eggs = attemptFertilization(profile, {
+        deltaDays, stage, name, notify,
+        chanceFactor: SUPERFETATION_CHANCE_FACTOR * decay,
+        superfetation: true,
+      });
+    }
   }
+
+  processSuperfetationImplantation(profile, tick, notify, name);
 
   const hasPreimplantationEmbryos = !isPregnancyStage(stage)
     && Array.isArray(pregnant.fetuses)
@@ -2412,6 +3113,8 @@ function clearPregnancyState(profile) {
   pregnant.prodromalOriginStage = null;
   pregnant.prodromalRemainingHours = 0;
   pregnant.prodromalDelayProgressHours = 0;
+  // 回归期被中断（流产／堕胎）时也要清掉，否则残留的进度会继续驱动孕服压力
+  delete pregnant.wombReturn;
   pregnant.fetuses = [];
   pregnant.fetusesCount = 0;
   pregnant.fetalEnergyDrain = 0;
@@ -2448,13 +3151,25 @@ function appendChildrenFromFetuses(profile, fetuses) {
       ? null
       : String(fetus.provider).trim() || null;
     children.push({
+      id: createChildId(),
       name: null,
       fathers: String(fetus?.fathers || '未知'),
       provider,
       providerSources: Array.isArray(fetus?.providerSources) ? [...fetus.providerSources] : [],
       chimera: fetus?.chimera ? cloneValue(fetus.chimera) : null,
+      tags: sanitizeFetusTagList(fetus?.tags),
+      identicalGroup: Number.isFinite(Number(fetus?.identicalGroup)) ? Number(fetus.identicalGroup) : null,
+      // 孕中孕：出生时把「宿主胎儿的 embryoId」换成宿主孩子的稳定 id。
+      // 产程是一胎一胎娩出的，宿主可能比被套的那胎晚出来，所以先记编号，
+      // 等两边都进了 children 再解析（linkNestedChildren）。
+      birthEmbryoId: Number.isFinite(Number(fetus?.embryoId)) ? Number(fetus.embryoId) : null,
+      nestedInEmbryoId: Number.isFinite(Number(fetus?.nestedInEmbryoId)) ? Number(fetus.nestedInEmbryoId) : null,
+      nestedInChildId: null,
       gender: String(fetus?.gender || '未知'),
       race: String(fetus?.race || '未知'),
+      // 父系种族在胎儿上本来就有，此前分娩时被丢掉，血缘图便无从得知路人父亲的血统
+      fatherRace: fetus?.fatherRace ? String(fetus.fatherRace) : null,
+      fatherDerivedType: fetus?.fatherDerivedType ? String(fetus.fatherDerivedType) : null,
       derivedType: childDerivedType,
       age: 0,
       birthWeightRatio: clampNumber(fetus?.weight, 0.33, 3.0, 1.0),
@@ -2463,6 +3178,26 @@ function appendChildrenFromFetuses(profile, fetuses) {
     });
   }
   profile.children = children;
+  linkNestedChildren(profile);
+}
+
+/**
+ * 把孕中孕孩子的 nestedInEmbryoId 解析成宿主孩子的稳定 id。
+ * 从後往前找：embryoId 只在单次妊娠内唯一，跨胎次会重号，
+ * 而同一次分娩的两个孩子必定相邻，取最近的那个才对。
+ */
+function linkNestedChildren(profile) {
+  const children = Array.isArray(profile?.children) ? profile.children : [];
+  for (let index = children.length - 1; index >= 0; index -= 1) {
+    const child = children[index];
+    if (!child?.nestedInEmbryoId || child.nestedInChildId) continue;
+    for (let back = children.length - 1; back >= 0; back -= 1) {
+      if (back === index) continue;
+      if (children[back]?.birthEmbryoId !== child.nestedInEmbryoId) continue;
+      child.nestedInChildId = children[back].id || null;
+      break;
+    }
+  }
 }
 
 /**
@@ -2514,6 +3249,8 @@ function applyChildbirthInternal(profile, female, isNatural) {
   const pregnant = profile.pregnant || {};
   const base = profile.base || {};
   const notify = profile.notify || {};
+  // 生出来了就没有藏的余地
+  revealSuperfetationFetuses(profile, female, null, { force: true });
   const experience = profile.experience || {};
   const runtime = profile.__runtimeRef || null;
   const remainingFetuses = Array.isArray(pregnant.fetuses) ? pregnant.fetuses.map((item) => ({ ...item })) : [];
@@ -3097,6 +3834,13 @@ function applyAbortion(chatState, args) {
 
   if (Number.isInteger(fetusIndex) && fetusIndex >= 0 && fetusIndex < fetuses.length) {
     const removedFetus = fetuses.splice(fetusIndex, 1)[0];
+    // 宿主没了，套在它体内的那一胎也活不下来
+    const removedEmbryoId = Number(removedFetus?.embryoId);
+    if (Number.isFinite(removedEmbryoId)) {
+      for (let index = fetuses.length - 1; index >= 0; index -= 1) {
+        if (Number(fetuses[index]?.nestedInEmbryoId) === removedEmbryoId) fetuses.splice(index, 1);
+      }
+    }
     pregnant.fetuses = fetuses;
     pregnant.fetusesCount = fetuses.length;
     profile.pregnant = pregnant;
@@ -3115,10 +3859,27 @@ function applyAbortion(chatState, args) {
     }
   }
 
+  // 回归期中断＝没能成为胎儿，但她不会被吐回来：这一路走的是「消化吸收」，
+  // 回归者就此并入承载者，角色维持冻结、不恢复原状。
+  // 胎内回归本来就分两种玩法——重生与消化，中断这条正是后者。
+  const digestedReturner = stage === WOMB_RETURN_STAGE
+    ? String(pregnant.wombReturn?.returner || '').trim()
+    : '';
+
   clearPregnancyState(profile);
   restorePregnancyPhysiology(profile, next.runtime || {});
 
-  if (MENSTRUAL_STAGES.includes(stage)) {
+  if (stage === WOMB_RETURN_STAGE) {
+    base.stage = '卵泡期';
+    base.days = 0;
+    profile.notify = {
+      ...notify,
+      firstly: `${female}进入了卵泡期`,
+      secondly: digestedReturner
+        ? `${digestedReturner}在${female}体内被消化吸收，成了她的一部分`
+        : `${female}体内的回归者被消化吸收了`,
+    };
+  } else if (MENSTRUAL_STAGES.includes(stage)) {
     base.stage = '卵泡期';
     base.days = 0;
     profile.notify = {
@@ -3151,6 +3912,9 @@ function applyAbortion(chatState, args) {
  * provider 只记录母源归属。单一母源出生后自动转交，多母源嵌合体留在孕母名下。
  */
 function applyImplantEmbryo(chatState, args) {
+  if (String(chatState.characters?.[String(args?.female || '').trim()]?.profile?.base?.stage || '') === WOMB_RETURN_STAGE) {
+    return { applied: false, message: 'bsImplantEmbryo skipped: 回归期中不能植入其他胚胎。' };
+  }
   const female = String(args?.female || '').trim();
   const character = chatState.characters?.[female];
   if (!female || !character) {
@@ -3306,8 +4070,7 @@ function applyChildbirth(chatState, args) {
 
   const next = cloneValue(character);
   const profile = next.profile || {};
-  const fetuses = Array.isArray(profile?.pregnant?.fetuses) ? profile.pregnant.fetuses : [];
-  if (fetuses.length === 0) {
+  if (getImplantedFetuses(profile).length === 0) {
     return { applied: false, message: `bsChildbirth skipped for ${female}: no fetuses.` };
   }
   const childbirthStage = String(profile?.base?.stage || '');
@@ -3353,8 +4116,8 @@ function applyLaborResistance(profile, female) {
     if (passed) successCount += 1;
     else failureCount += 1;
 
-    if (fetuses.length > 0) {
-      const randomFetusIndex = randomInt(0, fetuses.length - 1);
+    const randomFetusIndex = pickImplantedFetusIndex(fetuses);
+    if (randomFetusIndex >= 0) {
       const fetus = fetuses[randomFetusIndex];
       const currentAngle = Number.isFinite(Number(fetus?.tendencyAngle))
         ? Number(fetus.tendencyAngle)
@@ -3490,7 +4253,8 @@ function applyMaternalFetalInteraction(chatState, args) {
 
   const cooldown = profile.cooldown || {};
   if (direction === 'maternal') {
-    const selectedIndex = randomInt(0, fetuses.length - 1);
+    const selectedIndex = pickImplantedFetusIndex(fetuses);
+    if (selectedIndex < 0) return { applied: false, message: 'bsMaternalFetalInteraction skipped: 没有已著床的胎儿。' };
     const selectedFetus = fetuses[selectedIndex];
     const maternalChangeKeys = Object.keys(changeMap);
     const maternalChange = maternalChangeKeys[randomInt(0, maternalChangeKeys.length - 1)];
@@ -3540,7 +4304,8 @@ function applyMaternalFetalInteraction(chatState, args) {
   if (changeValue === undefined) {
     return { applied: false, message: `bsMaternalFetalInteraction skipped for ${female}: direction=fetal requires a valid change.` };
   }
-  const selectedIndex = randomInt(0, fetuses.length - 1);
+  const selectedIndex = pickImplantedFetusIndex(fetuses);
+  if (selectedIndex < 0) return { applied: false, message: 'bsMaternalFetalInteraction skipped: 没有已著床的胎儿。' };
   const selectedFetus = fetuses[selectedIndex];
   const currentAffinity = clampNumber(selectedFetus?.affinity, -50, 50, 0);
   selectedFetus.affinity = clampNumber(currentAffinity + changeValue, -50, 50, 0);
@@ -3773,6 +4538,7 @@ function applyTimeToCharacter(character, tick, options = {}) {
       applyWeeklyNutrition(profile);
     }
     updateDerivedTypeProgress(profile, tick);
+    revealSuperfetationFetuses(profile, next.name, notify);
     const derived = derivePregnancyStageState(pregnant.effectivePregnantDays, 1);
     stage = derived.stage;
     days = derived.days;
@@ -3816,6 +4582,11 @@ function applyTimeToCharacter(character, tick, options = {}) {
       pregnant.fetalEnergyDrain = 0;
       base.fertilizationDays = 0;
     }
+  } else if (stage === WOMB_RETURN_STAGE) {
+    const finished = advanceWombReturn(profile, deltaDays, next.name, notify);
+    stage = String(base.stage || stage);
+    days = clampNumber(base.days, 0, 9999, 0);
+    stageChanged = stageChanged || finished || stage !== oldStage;
   } else if (stage === '假孕期') {
     pregnant.pregnantDays = clampNumber(pregnant.pregnantDays, 0, 9999, 0) + deltaDays;
     const pseudoLimit = Math.max(1, 84 * clampNumber(getGestationEffectiveSpeed({ ...profile, bio }), 0.1, 20, 1));
@@ -3850,9 +4621,17 @@ function applyTimeToCharacter(character, tick, options = {}) {
     stageChanged = stageChanged || laborChanged || stage !== oldStage;
   } else if (stage === '无经期' || stage === '未激活') {
     days += deltaDays;
-    } else {
-      days += deltaDays;
+  } else {
+    // 未知阶段。这里不会让角色卡死——applyTimeToCharacter 结尾一定会过
+    // syncCharacterStageFromProfile，不在它保留清单里的阶段会被重设成月经阶段。
+    // 真正会卡住的是另一种组合：阶段已加进 state.js 的保留清单、却忘了在这里
+    // 加推进分支，那它就会被保留下来又永远不前进。警告是为了照出这一种。
+    days += deltaDays;
+    if (!reportedUnknownStages.has(stage)) {
+      reportedUnknownStages.add(stage);
+      console.warn(`[BS BioTracker] 阶段「${stage}」没有对应的推进分支；若它同时在 state.js 的保留清单内，将永远停在原地。`);
     }
+  }
 
   processSpermLifecycle(profile, stage, tick, next.name, options);
 
@@ -3983,8 +4762,20 @@ function applyPassedTime(chatState, args, options = {}) {
   for (const name of Object.keys(chatState.characters || {})) {
     const current = chatState.characters[name];
     if (!current || typeof current !== 'object') continue;
-    const tick = buildTimeTick(current, totalMinutes);
-    const result = applyTimeToCharacter(current, tick, options);
+    // 被吞进子宫的角色整个冻结：她现在是一颗胎儿，月经周期、代谢、受孕都不该继续跑
+    let subject = current;
+    const frozenHost = String(current?.profile?.base?.wombReturnHost || '').trim();
+    if (frozenHost) {
+      // 承载者已经不在了（被注销），再冻着就永远出不来，自动放人后照常推进
+      if (chatState.characters?.[frozenHost]) continue;
+      subject = cloneValue(current);
+      subject.profile = subject.profile || {};
+      const thawedBase = { ...(subject.profile.base || {}), isHere: true };
+      delete thawedBase.wombReturnHost;
+      subject.profile.base = thawedBase;
+    }
+    const tick = buildTimeTick(subject, totalMinutes);
+    const result = applyTimeToCharacter(subject, tick, options);
     chatState.characters[name] = result.character;
   }
   transferProviderChildren(chatState);
@@ -4253,10 +5044,16 @@ function applySetCharacterPresence(chatState, args) {
   const profile = next.profile || {};
   const base = profile.base || {};
   base.isHere = isPresent;
+  // 设回在场即解除胎内回归的冻结——这是既有的手动逃生口，不必另开工具
+  const unfroze = isPresent && Boolean(String(base.wombReturnHost || '').trim());
+  if (isPresent) delete base.wombReturnHost;
   profile.base = base;
   next.profile = profile;
   chatState.characters[female] = next;
-  return { applied: true, message: `bsSetCharacterPresence applied to ${female}: isHere=${isPresent}.` };
+  return {
+    applied: true,
+    message: `bsSetCharacterPresence applied to ${female}: isHere=${isPresent}.${unfroze ? ' 已解除胎内回归冻结。' : ''}`,
+  };
 }
 
 function applyUpdateExperience(chatState, args) {
@@ -4395,8 +5192,8 @@ function applyTrainSkill(chatState, args) {
   if (skillExp > 0 && FETAL_TALENT_TRANSFER_STAGES.has(stage)) {
     const pregnant = profile.pregnant || {};
     const fetuses = Array.isArray(pregnant.fetuses) ? pregnant.fetuses.map((fetus) => ({ ...fetus })) : [];
-    if (fetuses.length > 0) {
-      inheritedFetusIndex = randomInt(0, fetuses.length - 1);
+    inheritedFetusIndex = pickImplantedFetusIndex(fetuses);
+    if (inheritedFetusIndex >= 0) {
       const selectedFetus = fetuses[inheritedFetusIndex];
       const affinity = clampNumber(selectedFetus?.affinity, -50, 50, 0);
       inheritedExp = Math.round(skillExp * (Math.abs(affinity) / 50)) * Math.sign(affinity);
@@ -4441,7 +5238,10 @@ function applyUpdatePsychology(chatState, args) {
   const psychology = profile.psychology || {};
   const base = profile.base || {};
   const stage = String(base.stage || '');
-  const isPregnancySide = PREGNANCY_STAGES.includes(stage) || stage === '假孕期' || stage === '产兆前驱' || LABOR_STAGES.includes(stage);
+  // 回归期算妊娠侧：体感本来就是孕育状态，而且写进 mens 的资料会在转入妊娠满 7 天时
+  // 被 clearPsychologyTransitionState 清空（实测：孕 10 天后 mens.stance 变 undefined），
+  // 等于白写一场。
+  const isPregnancySide = PREGNANCY_STAGES.includes(stage) || stage === '假孕期' || stage === '产兆前驱' || stage === WOMB_RETURN_STAGE || LABOR_STAGES.includes(stage);
 
   const targetGroup = isPregnancySide ? 'preg' : 'mens';
   const sourcePatch = options[targetGroup];
@@ -4670,6 +5470,7 @@ function applySetMenstrualPhases(chatState, args) {
     || clampNumber(pregnant.effectivePregnantDays, 0, 9999, 0) > 0;
   const hasProtectedPregnancyState = PREGNANCY_STAGES.includes(currentStage)
     || currentStage === '产兆前驱'
+    || currentStage === WOMB_RETURN_STAGE
     || LABOR_STAGES.includes(currentStage);
 
   if (hasConceptionState || hasProtectedPregnancyState) {
@@ -4715,6 +5516,9 @@ function applySetMenstrualPhases(chatState, args) {
 
   profile.base = base;
   profile.pregnant = pregnant;
+  if (stage === '排卵期' && currentStage !== stage) {
+    syncManualMenstrualStageTransition(next, currentStage);
+  }
   profile.notify = {
     ...notify,
     firstly: `${female}进入了${stage}`,
@@ -5052,8 +5856,18 @@ function applyDebugSetProdromal(chatState, args) {
 
 export function applyToolCall(chatState, call, options = {}) {
   const name = String(call?.name || '').trim();
-  const args = normalizeToolCallArguments(call?.arguments);
+  const args = resolvePersonNameArgs(normalizeToolCallArguments(call?.arguments));
   if (!name) return { applied: false, message: 'Empty tool call name.' };
+  if (WOMB_FROZEN_BLOCKED_TOOLS.has(name)) {
+    const target = String(args?.female || '').trim();
+    const host = getWombReturnHost(chatState.characters?.[target]);
+    if (host) {
+      return {
+        applied: false,
+        message: `${name} skipped for ${target}: 她正在 ${host} 体内作为胎儿，生理状态已冻结。`,
+      };
+    }
+  }
   if (name === 'bsPassedTime') return applyPassedTime(chatState, args, options);
   if (name === 'bsWriteDiary') return applyWriteDiary(chatState, args);
   if (name === 'bsUpdateCharacterStatus') return applyCharacterStatus(chatState, args);
@@ -5075,6 +5889,7 @@ export function applyToolCall(chatState, call, options = {}) {
   if (name === 'bsAbortion') return applyAbortion(chatState, args);
   if (name === 'bsImplantEmbryo') return applyImplantEmbryo(chatState, args);
   if (name === 'bsRuptureMembranes') return applyRuptureMembranes(chatState, args);
+  if (name === 'bsWombReturn') return applyWombReturn(chatState, args);
   if (name === 'bsChildbirth') return applyChildbirth(chatState, args);
   if (name === 'bsMaternalFetalInteraction') return applyMaternalFetalInteraction(chatState, args);
   if (name === 'bsDebugInjectPregnancy') return applyDebugInjectPregnancy(chatState, args);

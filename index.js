@@ -45,7 +45,9 @@ import {
   PREGNANCY_STAGES,
 } from './scripts/stage_config.js';
 import { buildMainFlowPrompt, resetPoller, runTracker } from './scripts/tracker.js';
-import { applyToolCall, syncManualMenstrualStageTransition } from './scripts/tools.js';
+import { buildLineageView, relatedNodeIds } from './scripts/lineage_view.js';
+import { deriveFetusTags, getFetusTagLabels } from './scripts/fetus_tags.js';
+import { applyToolCall, isFetusKnownToCharacter, syncManualMenstrualStageTransition } from './scripts/tools.js';
 import { getEmbryoTypeReferenceText } from './scripts/embryo_prompt_context.js';
 import { buildSingleRacePhysiologyText } from './scripts/race_prompt_context.js';
 import { normalizeMemorySource, readMemorySource } from './scripts/memory_sources.js';
@@ -68,6 +70,7 @@ import {
 import {
   createEmptyChatState,
   DEFAULT_SYSTEM_PROMPT,
+  getApiUrlForFormat,
   getCharacterWorldBookName,
   getCharacterWorldBookNameViaSTscript,
   getActiveGlobalWorldBookNames,
@@ -86,6 +89,7 @@ import {
   loadCharacterAdditionalWorldBooks,
   loadGlobalWorldBook,
   MODULE_NAME,
+  normalizeApiFormat,
   normalizeCharacterPsychologyState,
   recordChatStateSnapshot,
   resolveRegisteredCharacterName,
@@ -910,6 +914,61 @@ function renderRegisterChildSourceOptions(ctx) {
   syncRegisterChildSourceFields(ctx);
 }
 
+/** 「直接写入」那两项各自需要的名字，勾了就必须填 */
+const SPECIAL_FETUS_NAME_FIELDS = {
+  rebirth: { inputId: 'bs-bt-special-rebirth', label: '胎内回归', missing: '请填写回到子宫里的那个人' },
+  surrogacy: { inputId: 'bs-bt-special-surrogacy', label: '代孕／托卵', missing: '请填写提供卵的那个人' },
+};
+
+/**
+ * 注册页「特殊胎儿来历」的勾选。
+ *
+ * 每一项都是一个勾选盒；勾了「直接写入」的两项还要各自填一个名字，勾了「交给模型」的
+ * 四项只转成提示词。差别在 registry.js 那侧处理，这里只负责收集与检查必填。
+ * 一项都没勾时回传 null，让注册路径跟以前完全一样，不多塞任何提示词。
+ *
+ * @returns {{request: object|null, error: string}} error 非空时代表勾了却没填名字
+ */
+function getSpecialFetusRequest() {
+  const checked = (key) => Boolean(document.querySelector(`[data-special-toggle="${key}"]`)?.checked);
+  const names = {};
+  for (const [key, field] of Object.entries(SPECIAL_FETUS_NAME_FIELDS)) {
+    if (!checked(key)) continue;
+    const value = String(document.getElementById(field.inputId)?.value || '').trim();
+    if (!value) return { request: null, error: `${field.label}：${field.missing}。` };
+    names[key] = value;
+  }
+  const hints = Array.from(document.querySelectorAll('[data-special-hint]'))
+    .filter((input) => input.checked)
+    .map((input) => String(input.getAttribute('data-special-hint') || ''))
+    .filter(Boolean);
+  if (!names.rebirth && !names.surrogacy && hints.length === 0) return { request: null, error: '' };
+  return { request: { rebirth: names.rebirth || '', surrogacy: names.surrogacy || '', hints }, error: '' };
+}
+
+/** 注册完成后回头看勾的特殊来历有没有真的落到胎儿身上，没有就回一句提醒 */
+function describeMissingSpecialFetus(request, character) {
+  if (!request) return '';
+  const fetuses = character?.profile?.pregnant?.fetuses;
+  if (!Array.isArray(fetuses) || fetuses.length === 0) return '注意：本次注册没有产生妊娠，勾选的特殊胎儿来历未套用。';
+  const missing = [];
+  const has = (predicate) => fetuses.some(predicate);
+  if (request.rebirth && !has((item) => Array.isArray(item?.tags) && item.tags.includes('rebirth'))) missing.push('胎内回归');
+  if (request.surrogacy && !has((item) => String(item?.provider || '').trim())) missing.push('代孕／托卵');
+  const hintChecks = {
+    chimera: (item) => Boolean(item?.chimera),
+    identical: (item) => Array.isArray(item?.tags) && item.tags.includes('identical'),
+    superfetation: (item) => Array.isArray(item?.tags) && item.tags.includes('superfetation'),
+    nested: (item) => Array.isArray(item?.tags) && item.tags.includes('nested'),
+  };
+  const hintLabels = { chimera: '嵌合体', identical: '同卵双胞胎', superfetation: '异期复孕', nested: '孕中孕' };
+  for (const key of Array.isArray(request.hints) ? request.hints : []) {
+    if (hintChecks[key] && !has(hintChecks[key])) missing.push(hintLabels[key]);
+  }
+  if (missing.length === 0) return '';
+  return `注意：模型没有实现 ${missing.join('、')}，可重跑一次注册。`;
+}
+
 function getRegisterFormValues(ctx = getContextSafe()) {
   const sourceChildKey = String(document.getElementById('bs-bt-register-source')?.value || '');
   const rawTargetName = String(document.getElementById('bs-bt-register-name')?.value || '').trim();
@@ -918,6 +977,7 @@ function getRegisterFormValues(ctx = getContextSafe()) {
     rawTargetName,
     declaredRace: String(document.getElementById('bs-bt-register-race')?.value || '').trim(),
     customNotes: String(document.getElementById('bs-bt-register-custom-notes')?.value || '').trim(),
+    specialFetus: getSpecialFetusRequest(),
     breedingInferencePrompt: String(document.getElementById('bs-bt-breeding-inference-prompt')?.value || '').trim(),
     skillPrompt: String(document.getElementById('bs-bt-register-skill-prompt')?.value || '').trim(),
     sourceChildKey,
@@ -1832,24 +1892,6 @@ function formatRaceLabel(race, derivedType) {
   return cleanRace || cleanDerived || '未设定';
 }
 
-function getCharacterStateForDisplay(character) {
-  if (!character || typeof character !== 'object') return character;
-  const cloned = typeof globalThis.structuredClone === 'function'
-    ? globalThis.structuredClone(character)
-    : JSON.parse(JSON.stringify(character));
-  const derivedType = String(cloned?.profile?.base?.derivedType || '').trim();
-  const metabolism = cloned?.profile?.metabolism;
-  if (!metabolism || typeof metabolism !== 'object') return cloned;
-  if (derivedType) {
-    for (const key of getDerivedTypeMetabolismExemptions(derivedType)) {
-      delete metabolism[key];
-    }
-  } else {
-    delete metabolism.flux;
-  }
-  return cloned;
-}
-
 function cloneJsonValue(value) {
   return typeof globalThis.structuredClone === 'function'
     ? globalThis.structuredClone(value)
@@ -2723,10 +2765,6 @@ function renderWardrobeMetricMap(values = {}, labels = WARDROBE_DIMENSION_LABELS
   }).join('') + '</div>';
 }
 
-function getWardrobeItemKind(item = {}) {
-  return item.slot === 'accessory' ? '配件' : '主件';
-}
-
 function renderWardrobeItemRow(item = {}, options = {}) {
   return `
     <div class="bs-bt-wardrobe-row-wrap">
@@ -2794,6 +2832,54 @@ function renderWardrobeCharacterList(characters = []) {
   }).join('');
 }
 
+const PREGFIT_DIM_LABELS = { masking: '遮蔽', support: '承托', capacity: '余裕', convenience: '便利' };
+
+/**
+ * 孕期衣着压力。四个维度画成共用同一条压力刻线的小量表：
+ * 长条是这套衣服在该维度的总值，刻线是当前孕期压力，条子没顶到刻线就是压不住，
+ * 差额直接用红色补在缺口上。这样「为什么这一维是负的」是看得出来的，
+ * 而不是丢四个各自独立的数字让人自己减。
+ *
+ * 总值不必另外存：gap = 总值 - 压力（tools.js refreshOutfitPregFit），
+ * 两者都被夹在 0-10，差值落在 -10~10，不会碰到 gap 自己的 -20/20 夹界，
+ * 所以 总值 = gap + 压力 可以精确还原。
+ */
+function renderPregFitGauge(pregFit) {
+  const pressure = Number(pregFit?.pregWearPressure);
+  if (!Number.isFinite(pressure)) return '';
+  const pct = (value) => Math.max(0, Math.min(100, (value / 10) * 100));
+  const pressurePct = pct(pressure);
+  const gap = pregFit?.gap || {};
+  const dims = Object.keys(PREGFIT_DIM_LABELS).map((key) => {
+    const rawGap = Number(gap[key]);
+    const safeGap = Number.isFinite(rawGap) ? rawGap : 0;
+    const total = Math.max(0, Math.min(10, safeGap + pressure));
+    const totalPct = pct(total);
+    const short = safeGap < 0;
+    return `<div class="bs-bt-pregfit__dim${short ? ' is-short' : ''}">
+      <div class="bs-bt-pregfit__dim-head">
+        <span class="bs-bt-pregfit__dim-label">${escapeHtml(PREGFIT_DIM_LABELS[key])}</span>
+        <span class="bs-bt-pregfit__dim-value">${safeGap > 0 ? '+' : ''}${escapeHtml(formatFixedDisplay(safeGap, 1))}</span>
+      </div>
+      <div class="bs-bt-pregfit__track">
+        <div class="bs-bt-pregfit__fill" style="width:${totalPct}%"></div>
+        ${short ? `<div class="bs-bt-pregfit__deficit" style="left:${totalPct}%;width:${Math.max(0, pressurePct - totalPct)}%"></div>` : ''}
+        <div class="bs-bt-pregfit__tick" style="left:${pressurePct}%"></div>
+      </div>
+    </div>`;
+  }).join('');
+  return `
+    <div class="bs-bt-pregfit">
+      <div class="bs-bt-pregfit__head">
+        <span class="bs-bt-pregfit__label">孕期衣着压力</span>
+        <span class="bs-bt-pregfit__value">${escapeHtml(formatFixedDisplay(pressure, 1))}<span class="bs-bt-pregfit__scale">/10</span></span>
+      </div>
+      <div class="bs-bt-pregfit__dims">${dims}</div>
+      <div class="bs-bt-pregfit__legend">竖线为当前压力，条子未及即为该维度压不住</div>
+    </div>
+  `;
+}
+
 function renderWardrobeCharacterPage(character) {
   const profile = character?.profile || {};
   if (profile?.wardrobe?.enabled !== true) {
@@ -2805,8 +2891,7 @@ function renderWardrobeCharacterPage(character) {
     </div>`;
   }
   const outfit = buildOutfitView(profile);
-  const pressure = Number(outfit?.pregFit?.pregWearPressure);
-  const pressureTag = Number.isFinite(pressure) ? '<span class="bs-bt-wardrobe-pressure-tag">孕衣压 ' + escapeHtml(formatFixedDisplay(pressure, 1)) + '</span>' : '';
+  const pregFitHtml = renderPregFitGauge(outfit?.pregFit);
   const currentIds = new Set([outfit.main?.id, ...(outfit.accessories || []).map((item) => item.id)].filter((id) => id !== undefined && id !== null));
   const items = getWardrobeItems(profile).filter((item) => Number(item?.id) !== 0);
   const mainItems = items.filter((item) => item.slot !== 'accessory');
@@ -2824,9 +2909,10 @@ function renderWardrobeCharacterPage(character) {
       </div>
       <div class="bs-bt-wardrobe-page-title">${escapeHtml(character?.name || '未命名')}</div>
       <div class="bs-bt-wardrobe-current">
-        <div class="bs-bt-wardrobe-current-head"><div class="bs-bt-wardrobe-group-title">当前穿着</div>${pressureTag}</div>
+        <div class="bs-bt-wardrobe-current-head"><div class="bs-bt-wardrobe-group-title">当前穿着</div></div>
         <div class="bs-bt-wardrobe-summary"><b>主件</b>${escapeHtml(outfit.main?.name || '全裸')}</div>
         <div class="bs-bt-wardrobe-summary"><b>配件</b>${escapeHtml((outfit.accessories || []).length > 0 ? outfit.accessories.map((item) => item.name || item.id).join('、') : '无')}</div>
+        ${pregFitHtml}
         <div class="bs-bt-wardrobe-outfit-editor">
           <label>主件<select id="bs-bt-wardrobe-outfit-main" class="text_pole">
             <option value="0"${Number(outfit.main?.id) === 0 ? ' selected' : ''}>全裸</option>
@@ -3042,8 +3128,11 @@ function buildTrackCharacterViewModel(character) {
       prodromalRemainingHours: Number(pregnant.prodromalRemainingHours) || 0,
       prodromalDelayProgressHours: Number(pregnant.prodromalDelayProgressHours) || 0,
       amnionDurability: Number(pregnant.amnionDurability) || 0,
-      fetuses: Array.isArray(pregnant.fetuses) ? pregnant.fetuses.map((fetus) => ({
+      // 未揭晓的异期胎在追踪页也藏起来，与提示词一致；完整变量页仍看得到
+      fetuses: Array.isArray(pregnant.fetuses) ? pregnant.fetuses.filter(isFetusKnownToCharacter).map((fetus) => ({
         ...fetus,
+        // 标签在这里解析：推导需要承载者名字，渲染层拿不到
+        tagLabels: getFetusTagLabels(deriveFetusTags(fetus, { carrierName: character?.name || '' })),
         talents: (Array.isArray(fetus?.talents) ? fetus.talents : []).map(enrichTalent),
       })) : [],
       pregnantBlocks: parseDescriptionBlocks(descriptions.pregnantDescription),
@@ -3163,13 +3252,6 @@ function renderProgressList(items) {
     .join('');
 }
 
-function renderCardList(items, renderCard, emptyText) {
-  if (!Array.isArray(items) || items.length === 0) {
-    return `<div class="bs-bt-track-card-empty">${escapeHtml(emptyText)}</div>`;
-  }
-  return `<div class="bs-bt-track-cards">${items.map((item, index) => renderCard(item, index)).join('')}</div>`;
-}
-
 function renderTrackTitle(title, badge = '') {
   const badgeHtml = String(badge || '').trim()
     ? `<span class="bs-bt-track-title-badge">${escapeHtml(badge)}</span>`
@@ -3209,6 +3291,7 @@ function renderCardCarouselSection(title, items, renderCard, emptyText, kind, op
           }
         </span>
       </div>
+      ${options.lead || ''}
       <div class="bs-bt-track-cards bs-bt-track-cards--single">${renderCard(currentItem, currentIndex)}</div>
     </div>
   `;
@@ -3286,6 +3369,73 @@ function renderTrackPsychology(viewModel) {
   `;
 }
 
+/**
+ * 精液来源的占比环：两个以上来源才画——只有一个来源时整圈都是他，看不出资讯。
+ *
+ * 画的是「残留量占总量的比例」，这正是引擎里的 share 项：受精判定时每个来源的
+ * 命中率会乘上自己的 share。但 share 不等于最终中奖率——同族／异族、胎生卵生
+ * 不同还会各自乘上难度系数，所以这里只标占比，不标机率。
+ *
+ * 不引入新色盘：12 套主题的配色差异太大，固定色系一定会跟某几套打架。
+ * 改用同一个 currentColor 的阶梯透明度加分隔缺口，任何主题下都读得出来。
+ */
+const SPERM_SHARE_STEPS = [1, 0.68, 0.46, 0.32, 0.22, 0.16];
+
+function renderSpermShareChart(sperms) {
+  const items = (Array.isArray(sperms) ? sperms : [])
+    .map((item) => ({ male: String(item?.male || '未知'), value: Math.max(0, Number(item?.value) || 0) }))
+    .filter((item) => item.value > 0)
+    .sort((a, b) => b.value - a.value);
+  if (items.length < 2) return '';
+
+  const total = items.reduce((sum, item) => sum + item.value, 0);
+  if (total <= 0) return '';
+
+  const radius = 30;
+  const circumference = 2 * Math.PI * radius;
+  // 分隔缺口固定 2 单位；缺口总长不能吃掉整圈，来源多时按比例缩小
+  const gap = Math.min(2, circumference / (items.length * 6));
+  const drawable = circumference - gap * items.length;
+  let offset = 0;
+  const segments = items.map((item, index) => {
+    const length = (item.value / total) * drawable;
+    const dash = `${length.toFixed(2)} ${(circumference - length).toFixed(2)}`;
+    const seg = `<circle cx="40" cy="40" r="${radius}" fill="none" stroke="currentColor"
+      stroke-width="14" stroke-opacity="${SPERM_SHARE_STEPS[index % SPERM_SHARE_STEPS.length]}"
+      stroke-dasharray="${dash}" stroke-dashoffset="${(-offset).toFixed(2)}" />`;
+    offset += length + gap;
+    return seg;
+  }).join('');
+
+  const legend = items.map((item, index) => `
+    <div class="bs-bt-sperm-share__row">
+      <span class="bs-bt-sperm-share__swatch" style="opacity:${SPERM_SHARE_STEPS[index % SPERM_SHARE_STEPS.length]}"></span>
+      <span class="bs-bt-sperm-share__name">${escapeHtml(item.male)}</span>
+      <span class="bs-bt-sperm-share__pct">${Math.round((item.value / total) * 100)}%</span>
+      <span class="bs-bt-sperm-share__val">${Math.round(item.value)}</span>
+    </div>
+  `).join('');
+
+  return `
+    <div class="bs-bt-sperm-share">
+      <svg class="bs-bt-sperm-share__ring" viewBox="0 0 80 80" role="img" aria-label="精液来源占比">
+        <g transform="rotate(-90 40 40)">${segments}</g>
+        <text x="40" y="38" text-anchor="middle" class="bs-bt-sperm-share__total">${Math.round(total)}</text>
+        <text x="40" y="50" text-anchor="middle" class="bs-bt-sperm-share__unit">总残留</text>
+      </svg>
+      <div class="bs-bt-sperm-share__legend">${legend}</div>
+    </div>
+  `;
+}
+
+/** 胎儿标签列：没有标签就整列不出现，一般妊娠不会多一行空的 */
+function renderFetusTagRow(fetus) {
+  const labels = Array.isArray(fetus?.tagLabels) ? fetus.tagLabels : [];
+  if (labels.length === 0) return '';
+  const chips = labels.map((label) => `<span class="bs-bt-fetus-tag">${escapeHtml(label)}</span>`).join('');
+  return `<div class="bs-bt-fetus-tags">${chips}</div>`;
+}
+
 function renderTrackPregnancy(viewModel) {
   const data = viewModel.pregnancy;
   const gestationModifier = data.gestationModifier || {};
@@ -3329,7 +3479,7 @@ function renderTrackPregnancy(viewModel) {
         </div>`,
       '当前无精液残留',
       'sperms',
-      { badge: fertilityBadge },
+      { badge: fertilityBadge, lead: renderSpermShareChart(data.sperms) },
     )}
     ${renderCardCarouselSection(
       '本周期受精竞争',
@@ -3349,9 +3499,14 @@ function renderTrackPregnancy(viewModel) {
         data.fetuses,
         (item, index) => `<div class="bs-bt-track-card">
                 <div class="bs-bt-track-card-title">胎儿 ${index + 1}</div>
+                ${renderFetusTagRow(item)}
                 <div class="bs-bt-track-list-row"><span class="bs-bt-track-list-label">父方姓名</span><span class="bs-bt-track-list-value">${escapeHtml(item?.fathers || '未知')}</span></div>
                 ${item?.provider
-            ? `<div class="bs-bt-track-list-row"><span class="bs-bt-track-list-label">provider</span><span class="bs-bt-track-list-value">${escapeHtml(item.provider)}</span></div>`
+            ? `<div class="bs-bt-track-list-row"><span class="bs-bt-track-list-label">遗传母方</span><span class="bs-bt-track-list-value">${escapeHtml(item.provider)}</span></div>`
+            : ''
+          }
+                ${item?.chimera
+            ? `<div class="bs-bt-track-list-row"><span class="bs-bt-track-list-label">嵌合来源</span><span class="bs-bt-track-list-value">${escapeHtml(`${Number(item.chimera.sourceCount) || 2} 颗受精卵`)}</span></div>`
             : ''
           }
                 <div class="bs-bt-track-list-row"><span class="bs-bt-track-list-label">父方种族</span><span class="bs-bt-track-list-value">${escapeHtml(formatRaceLabel(item?.fatherRace, item?.fatherDerivedType))}</span></div>
@@ -3528,21 +3683,210 @@ function renderTrackExperience(viewModel) {
       </div>
     </div>
     ${renderTrackSkillSection(viewModel)}
-    ${renderCardCarouselSection(
-      '孩子记录',
-        viewModel.experience.children,
-        (item, index) => `<div class="bs-bt-track-card">
-          <div class="bs-bt-track-card-title">${escapeHtml(item?.name || `孩子 ${index + 1}`)}</div>
-          <div class="bs-bt-track-list-row"><span class="bs-bt-track-list-label">父方</span><span class="bs-bt-track-list-value">${escapeHtml(item?.fathers || '未知')}</span></div>
-          <div class="bs-bt-track-list-row"><span class="bs-bt-track-list-label">性别</span><span class="bs-bt-track-list-value">${escapeHtml(item?.gender || '未知')}</span></div>
-          <div class="bs-bt-track-list-row"><span class="bs-bt-track-list-label">种族</span><span class="bs-bt-track-list-value">${escapeHtml(formatRaceLabel(item?.race, item?.derivedType))}</span></div>
-          <div class="bs-bt-track-list-row"><span class="bs-bt-track-list-label">年龄</span><span class="bs-bt-track-list-value">${escapeHtml(formatIntegerDisplay(item?.age))}</span></div>
-          <div class="bs-bt-track-list-row"><span class="bs-bt-track-list-label">待注册天赋</span><span class="bs-bt-track-list-value">${escapeHtml((Array.isArray(item?.talents) ? item.talents : []).map((talent) => `${talent.name}：${talent.label}`).join('、') || '无')}</span></div>
-        </div>`,
-        '当前无孩子记录',
-      'children',
-    )}
+    ${renderTrackLineageEntry(viewModel)}
   `;
+}
+
+/**
+ * 经历页的子女入口：孩子卡原本整排铺在这里，资讯挤且看不出血缘。
+ * 改成一句摘要 + 一个按钮，详情与关系都进族谱视窗看。
+ */
+function renderTrackLineageEntry(viewModel) {
+  const children = Array.isArray(viewModel?.experience?.children) ? viewModel.experience.children : [];
+  const name = String(viewModel?.name || '').trim();
+  const summary = children.length > 0
+    ? `共 ${children.length} 名子女`
+    : '暂无子女记录';
+  return `
+    <div class="bs-bt-track-section">
+      <div class="bs-bt-track-section-title">血缘</div>
+      <div class="bs-bt-track-meta">
+        <div class="bs-bt-track-meta-row">
+          <span class="bs-bt-track-meta-label">${escapeHtml(summary)}</span>
+          <button type="button" class="menu_button bs-bt-lineage-open" data-lineage-center="${escapeHtml(name)}">族谱</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+const LINEAGE_ID = 'bs-bt-lineage';
+
+function lineageDetailRows(node) {
+  if (!node) return '';
+  const rows = [
+    ['种族', node.raceLabel || '未知'],
+    ['性别', node.gender || '—'],
+    ['年龄', node.ageLabel || '未知'],
+    ['世代', node.generation === 0 ? '本人' : (node.generation < 0 ? `上${Math.abs(node.generation)}代` : `下${node.generation}代`)],
+    ['亲代', node.geneticParents.map((item) => `${item.relation}：${item.name}`).join('、') || '无记录'],
+    ['子代', node.children.map((item) => item.name).join('、') || '无记录'],
+  ];
+  // 代孕分开列：承载者不是遗传亲代，混进亲代那行会让血统看起来多一个人
+  if (node.carriers.length > 0) rows.push(['孕育者', `${node.carriers.map((item) => item.name).join('、')}（代孕承载）`]);
+  if (node.carriedChildren.length > 0) rows.push(['代孕承载', node.carriedChildren.map((item) => item.name).join('、')]);
+  if (node.kind === 'unregistered') rows.push(['状态', '未注册（仅作为亲代出现）']);
+  // 只在亲代那行空着时才补这句：有亲代时它是废话，没亲代时它是唯一线索，
+  // 说明这人确实在故事里出生过，只是上一代被深度截断或没登记。
+  if (node.kind === 'character' && node.childId && node.parents.length === 0) {
+    rows.push(['出身', '在本故事中出生（上代未显示）']);
+  }
+  if (Array.isArray(node.extraSources) && node.extraSources.length > 0) {
+    rows.push(['其他来源', `${node.extraSources.join('、')}（嵌合体，仅首位连线）`]);
+  }
+  return rows
+    .map(([label, value]) => `<div class="bs-bt-lineage__detail-row"><span class="bs-bt-lineage__detail-label">${escapeHtml(label)}</span><span class="bs-bt-lineage__detail-value">${escapeHtml(String(value))}</span></div>`)
+    .join('');
+}
+
+/**
+ * 肖像牌上的字：没有头像素材，用名字压缩成两格。
+ * 只取一个字会撞——「祖母」与「祖父」都会变成「祖」，族谱上分不出谁是谁。
+ * 拉丁名取各段字首（John Smith → JS），其余（含中日韩）取前两个字。
+ */
+function lineageInitial(name) {
+  const text = String(name || '').trim();
+  if (!text) return '?';
+  if (/^[a-z0-9][a-z0-9\s._'-]*$/i.test(text)) {
+    const words = text.split(/[\s._-]+/).filter(Boolean);
+    if (words.length > 1) return (words[0][0] + words[1][0]).toUpperCase();
+    return text.slice(0, 2).toUpperCase();
+  }
+  return [...text].slice(0, 2).join('');
+}
+
+const LINEAGE_SEX_GLYPHS = { 男: '♂', 女: '♀', 雄: '♂', 雌: '♀' };
+
+function lineageSexGlyph(node) {
+  const gender = String(node?.gender || '').trim();
+  if (!gender) return '';
+  for (const [key, glyph] of Object.entries(LINEAGE_SEX_GLYPHS)) {
+    if (gender.includes(key)) return glyph;
+  }
+  return '⚥';
+}
+
+function renderLineageCard(node) {
+  const sex = lineageSexGlyph(node);
+  const sub = node.raceLabel || (node.kind === 'unregistered' ? '未注册' : '—');
+  return `
+    <button type="button"
+      class="bs-bt-lineage__card${node.isCenter ? ' is-center' : ''}${node.kind === 'unregistered' ? ' is-ghost' : ''}"
+      data-lineage-node="${escapeHtml(node.id)}"
+      ${node.hasDetail ? '' : 'disabled'}>
+      <span class="bs-bt-lineage__portrait">
+        <span class="bs-bt-lineage__initial">${escapeHtml(lineageInitial(node.displayName))}</span>
+        ${sex ? `<span class="bs-bt-lineage__sex">${sex}</span>` : ''}
+      </span>
+      <span class="bs-bt-lineage__card-name">${escapeHtml(node.displayName)}</span>
+      <span class="bs-bt-lineage__card-sub">${escapeHtml(sub)}</span>
+      <span class="bs-bt-lineage__card-age">${escapeHtml(node.ageLabel || '')}</span>
+      ${node.isCenter ? '<span class="bs-bt-lineage__badge">本人</span>' : ''}
+    </button>
+  `;
+}
+
+/** 一丛手足共用的亲代标注，兼作连接线的起点 */
+function renderLineageCluster(cluster) {
+  const caption = cluster.parents
+    .map((item) => `${item.relation} ${item.name}`)
+    .join(' × ');
+  return `
+    <div class="bs-bt-lineage__cluster">
+      ${caption ? `<div class="bs-bt-lineage__cluster-parents">${escapeHtml(caption)}</div>` : ''}
+      <div class="bs-bt-lineage__cluster-cards${caption ? ' has-link' : ''}">
+        ${cluster.nodes.map(renderLineageCard).join('')}
+      </div>
+    </div>
+  `;
+}
+
+function renderLineageChart(view) {
+  if (view.empty) {
+    return `<div class="bs-bt-lineage__empty">找不到 ${escapeHtml(view.centerName)} 的血缘记录。</div>`;
+  }
+  return view.generations
+    .map((row) => `
+      <div class="bs-bt-lineage__row">
+        <div class="bs-bt-lineage__row-label"><span>${escapeHtml(row.label)}</span></div>
+        <div class="bs-bt-lineage__row-scroll">
+          <div class="bs-bt-lineage__clusters">
+            ${row.clusters.map(renderLineageCluster).join('')}
+          </div>
+        </div>
+      </div>
+    `)
+    .join('');
+}
+
+let lineageViewCache = null;
+
+function selectLineageNode(nodeId) {
+  const root = document.getElementById(LINEAGE_ID);
+  if (!root || !lineageViewCache) return;
+  const node = lineageViewCache.nodes.find((item) => item.id === nodeId) || null;
+  const related = new Set(node ? relatedNodeIds(lineageViewCache, nodeId) : []);
+  root.classList.toggle('has-selection', Boolean(node));
+  root.querySelectorAll('[data-lineage-node]').forEach((cell) => {
+    const id = cell.dataset.lineageNode;
+    cell.classList.toggle('is-selected', Boolean(node) && id === nodeId);
+    cell.classList.toggle('is-related', related.has(id));
+  });
+  const detail = root.querySelector('.bs-bt-lineage__detail');
+  if (!detail) return;
+  detail.innerHTML = node
+    ? `<div class="bs-bt-lineage__detail-title">${escapeHtml(node.displayName)}</div>${lineageDetailRows(node)}`
+    : '<div class="bs-bt-lineage__detail-title">选择一个人查看详情</div>';
+}
+
+function ensureLineageWindow(ctx) {
+  let root = document.getElementById(LINEAGE_ID);
+  if (root) return root;
+  root = document.createElement('div');
+  root.id = LINEAGE_ID;
+  // 与浮球同样自带主题 class：视窗挂在 body 下，拿不到面板作用域的主题变数
+  root.className = `bs-bt-lineage theme-${getSettings(ctx).theme || 'retro'}`;
+  root.innerHTML = `
+    <div class="bs-bt-lineage__head">
+      <div class="bs-bt-lineage__title"></div>
+      <div class="bs-bt-lineage__hint">点选查看关系</div>
+      <button type="button" class="bs-bt-lineage__close" aria-label="关闭">×</button>
+    </div>
+    <div class="bs-bt-lineage__body">
+      <div class="bs-bt-lineage__chart"></div>
+      <div class="bs-bt-lineage__detail"></div>
+    </div>
+  `;
+  document.body.appendChild(root);
+  root.querySelector('.bs-bt-lineage__close')?.addEventListener('click', () => closeLineageWindow());
+  root.querySelector('.bs-bt-lineage__chart')?.addEventListener('click', (event) => {
+    const cell = event.target?.closest?.('[data-lineage-node]');
+    if (!cell || cell.disabled) return;
+    selectLineageNode(cell.dataset.lineageNode);
+  });
+  return root;
+}
+
+function closeLineageWindow() {
+  const root = document.getElementById(LINEAGE_ID);
+  if (!root) return;
+  root.classList.remove('is-open', 'has-selection');
+  lineageViewCache = null;
+}
+
+function openLineageWindow(ctx, centerName) {
+  const settings = getSettings(ctx);
+  const chatState = getChatState(ctx, settings);
+  const view = buildLineageView(chatState, centerName);
+  lineageViewCache = view;
+  const root = ensureLineageWindow(ctx);
+  root.className = `bs-bt-lineage theme-${settings.theme || 'retro'}`;
+  root.querySelector('.bs-bt-lineage__title').textContent = `${centerName} 的血缘`;
+  root.querySelector('.bs-bt-lineage__chart').innerHTML = renderLineageChart(view);
+  root.classList.add('is-open');
+  selectLineageNode(view.empty ? null : view.centerId);
+  // 窄屏上每一代各自横向卷动，中心角色常常落在画面外，开窗时先把他卷到视野中央
+  root.querySelector('.bs-bt-lineage__card.is-center')?.scrollIntoView({ block: 'nearest', inline: 'center' });
 }
 
 function renderTrackDiary(viewModel) {
@@ -5237,6 +5581,73 @@ function updateClock(settings) {
   }
 }
 
+/**
+ * iPhone 主题的可自订字体。只给整组字体堆叠，不让使用者直接填 font-family——
+ * 填错会整个面板掉回预设字体，而且中文字型必须留 fallback 才不会缺字。
+ */
+const IPHONE_FONT_STACKS = {
+  system: "-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang TC', 'Microsoft JhengHei', 'Noto Sans TC', system-ui, sans-serif",
+  rounded: "'SF Pro Rounded', 'Nunito', 'Quicksand', 'PingFang TC', 'Microsoft JhengHei', system-ui, sans-serif",
+  serif: "'Noto Serif TC', 'Songti TC', 'Source Han Serif TC', Georgia, serif",
+  mono: "'SF Mono', 'JetBrains Mono', 'Cascadia Code', Consolas, 'Noto Sans Mono CJK TC', monospace",
+  hand: "'LXGW WenKai TC', 'Klee One', 'Yuanti TC', cursive",
+};
+
+function normalizeHexColor(value, fallback) {
+  const text = String(value || '').trim();
+  return /^#[0-9a-f]{6}$/i.test(text) ? text.toLowerCase() : fallback;
+}
+
+const normalizeIphoneAccent = (value) => normalizeHexColor(value, '#0a84ff');
+const normalizeIphoneCase = (value) => normalizeHexColor(value, '#c8c2b8');
+
+/**
+ * 三个挂载点（面板／浮球／族谱视窗）各自独立，所以自订值写在 documentElement 上，
+ * 靠继承一次覆盖到底，不必每个节点各设一遍。非 iphone 主题会清掉，避免残留。
+ */
+function applyIphoneCustomization(settings) {
+  const root = document.documentElement;
+  if (!root) return;
+  if (String(settings?.theme || '') !== 'iphone') {
+    root.removeAttribute('data-bsbt-iphone-base');
+    root.style.removeProperty('--bsbt-user-accent');
+    root.style.removeProperty('--bsbt-user-case');
+    root.style.removeProperty('--bsbt-user-font');
+    return;
+  }
+  root.dataset.bsbtIphoneBase = String(settings?.iphoneBase || 'light') === 'dark' ? 'dark' : 'light';
+  root.style.setProperty('--bsbt-user-accent', normalizeIphoneAccent(settings?.iphoneAccent));
+  root.style.setProperty('--bsbt-user-case', normalizeIphoneCase(settings?.iphoneCase));
+  const fontKey = String(settings?.iphoneFont || 'system');
+  root.style.setProperty('--bsbt-user-font', IPHONE_FONT_STACKS[fontKey] || IPHONE_FONT_STACKS.system);
+}
+
+function syncIphonePanel(settings) {
+  const panel = document.getElementById('bs-bt-iphone-panel');
+  if (!panel) return;
+  const isIphone = String(settings?.theme || '') === 'iphone';
+  panel.hidden = !isIphone;
+  if (!isIphone) return;
+  const base = String(settings?.iphoneBase || 'light') === 'dark' ? 'dark' : 'light';
+  document.querySelectorAll('#bs-biotracker-settings [data-iphone-base-option]').forEach((node) => {
+    node.classList.toggle('is-active', String(node.dataset.iphoneBaseOption) === base);
+  });
+  const accent = normalizeIphoneAccent(settings?.iphoneAccent);
+  document.querySelectorAll('#bs-biotracker-settings [data-iphone-accent-option]').forEach((node) => {
+    node.classList.toggle('is-active', String(node.dataset.iphoneAccentOption).toLowerCase() === accent);
+  });
+  const accentInput = document.getElementById('bs-bt-iphone-accent');
+  if (accentInput) accentInput.value = accent;
+  const caseColor = normalizeIphoneCase(settings?.iphoneCase);
+  document.querySelectorAll('#bs-biotracker-settings [data-iphone-case-option]').forEach((node) => {
+    node.classList.toggle('is-active', String(node.dataset.iphoneCaseOption).toLowerCase() === caseColor);
+  });
+  const caseInput = document.getElementById('bs-bt-iphone-case');
+  if (caseInput) caseInput.value = caseColor;
+  const fontSelect = document.getElementById('bs-bt-iphone-font');
+  if (fontSelect) fontSelect.value = IPHONE_FONT_STACKS[String(settings?.iphoneFont || '')] ? String(settings.iphoneFont) : 'system';
+}
+
 function applyTheme(settings) {
   const root = document.getElementById(PANEL_ID);
   const sphere = document.getElementById('bs-bt-floating-sphere');
@@ -5258,6 +5669,8 @@ function applyTheme(settings) {
   document.querySelectorAll('#bs-biotracker-settings [data-font-size-option]').forEach((node) => {
     node.classList.toggle('is-active', String(node.dataset.fontSizeOption || 'standard') === fontSize);
   });
+  applyIphoneCustomization(settings);
+  syncIphonePanel(settings);
   const brand = document.getElementById('bs-bt-brand');
   if (brand) brand.textContent = 'Bastneth Pager';
   updateBatteryIndicator(settings);
@@ -5287,6 +5700,22 @@ function getLastPagerView() {
     }
   } catch {}
   return 'home';
+}
+
+function updateApiEndpointPreview() {
+  try {
+    const baseInput = document.getElementById('bs-bt-api-url');
+    const formatInput = document.getElementById('bs-bt-api-format');
+    const previewCode = document.getElementById('bs-bt-api-endpoint-preview-code');
+    if (!previewCode) return;
+    const rawBase = String(baseInput?.value || '').trim();
+    const format = normalizeApiFormat(formatInput?.value);
+    const base = rawBase
+      .replace(/\/+$/, '')
+      .replace(/\/(chat\/completions|models|responses|messages|interactions)$/i, '')
+      .replace(/\/+$/, '') || '<Base URL>';
+    previewCode.textContent = getApiUrlForFormat(base, format);
+  } catch {}
 }
 
 async function refreshMemorySourceStatus(ctx) {
@@ -5368,6 +5797,8 @@ function applySettingsToForm(ctx) {
   setValue('bs-bt-enabled', settings.enabled);
   setValue('bs-bt-tracker-preset-list', settings.useStPresetForAsync ? CURRENT_PRESET_OPTION_VALUE : (settings.trackerPresetName || NO_PRESET_OPTION_VALUE));
   setValue('bs-bt-api-url', settings.apiUrl);
+  setValue('bs-bt-api-format', normalizeApiFormat(settings.apiFormat));
+  updateApiEndpointPreview();
   setValue('bs-bt-api-key', settings.apiKey);
   setValue('bs-bt-model', settings.model);
   setValue('bs-bt-formatted-output-v4', settings.formattedOutputV4 !== false);
@@ -5666,20 +6097,6 @@ function normalizePromptListForDisplay(prompts, presetName) {
   return ordered;
 }
 
-function getPromptDisplayMeta(prompt) {
-  const isMarkerPrompt = !!prompt?.marker && Number(prompt?.injection_position) !== 1;
-  const isImportantPrompt = !prompt?.marker && !!prompt?.system_prompt && Number(prompt?.injection_position) !== 1 && !!prompt?.forbid_overrides;
-  const isSystemPrompt = !prompt?.marker && !!prompt?.system_prompt && Number(prompt?.injection_position) !== 1 && !prompt?.forbid_overrides;
-  const isUserPrompt = !prompt?.marker && !prompt?.system_prompt && Number(prompt?.injection_position) !== 1;
-  const isInjectionPrompt = Number(prompt?.injection_position) === 1;
-  if (isMarkerPrompt) return { icon: 'fa-thumb-tack', title: 'Marker' };
-  if (isImportantPrompt) return { icon: 'fa-star', title: 'Important Prompt' };
-  if (isSystemPrompt) return { icon: 'fa-square-poll-horizontal', title: 'Global Prompt' };
-  if (isUserPrompt) return { icon: 'fa-asterisk', title: 'Preset Prompt' };
-  if (isInjectionPrompt) return { icon: 'fa-syringe', title: 'In-Chat Injection' };
-  return { icon: 'fa-asterisk', title: 'Prompt' };
-}
-
 function getPromptTypeGlyph(prompt) {
   const isMarkerPrompt = !!prompt?.marker && Number(prompt?.injection_position) !== 1;
   const isImportantPrompt = !prompt?.marker && !!prompt?.system_prompt && Number(prompt?.injection_position) !== 1 && !!prompt?.forbid_overrides;
@@ -5954,6 +6371,7 @@ function readSettingsFromForm(ctx) {
     settings.trackerPresetName = normalizeTrackerPresetSelectionValue(trackerPresetSelectionValue);
   }
   settings.apiUrl = String(getValue('bs-bt-api-url')).trim();
+  settings.apiFormat = normalizeApiFormat(getValue('bs-bt-api-format'));
   settings.apiKey = String(getValue('bs-bt-api-key')).trim();
   settings.model = String(getValue('bs-bt-model')).trim();
   const formattedOutputToggle = document.getElementById('bs-bt-formatted-output-v4');
@@ -6545,6 +6963,54 @@ async function ensureModal(ctx) {
       setView('theme');
     }),
   );
+  // iPhone 主题的三项自订：与主题切换同样容错，设置读写失败也要让 UI 先套用
+  const commitIphoneSetting = (mutate) => {
+    let settings = null;
+    try {
+      settings = getSettings(ctx);
+    } catch (error) {
+      console.error('[BS BioTracker] getSettings failed on iphone customization', error);
+      return;
+    }
+    mutate(settings);
+    try {
+      saveSettings(ctx);
+    } catch (error) {
+      console.error('[BS BioTracker] saveSettings failed on iphone customization', error);
+    }
+    applyTheme(settings);
+  };
+  document.querySelectorAll('#bs-biotracker-settings [data-iphone-base-option]').forEach((node) =>
+    node.addEventListener('click', () => {
+      const next = String(node.dataset.iphoneBaseOption) === 'dark' ? 'dark' : 'light';
+      commitIphoneSetting((settings) => { settings.iphoneBase = next; });
+    }),
+  );
+  document.querySelectorAll('#bs-biotracker-settings [data-iphone-accent-option]').forEach((node) =>
+    node.addEventListener('click', () => {
+      const next = normalizeIphoneAccent(node.dataset.iphoneAccentOption);
+      commitIphoneSetting((settings) => { settings.iphoneAccent = next; });
+    }),
+  );
+  document.getElementById('bs-bt-iphone-accent')?.addEventListener('input', (event) => {
+    const next = normalizeIphoneAccent(event.target?.value);
+    commitIphoneSetting((settings) => { settings.iphoneAccent = next; });
+  });
+  document.querySelectorAll('#bs-biotracker-settings [data-iphone-case-option]').forEach((node) =>
+    node.addEventListener('click', () => {
+      const next = normalizeIphoneCase(node.dataset.iphoneCaseOption);
+      commitIphoneSetting((settings) => { settings.iphoneCase = next; });
+    }),
+  );
+  document.getElementById('bs-bt-iphone-case')?.addEventListener('input', (event) => {
+    const next = normalizeIphoneCase(event.target?.value);
+    commitIphoneSetting((settings) => { settings.iphoneCase = next; });
+  });
+  document.getElementById('bs-bt-iphone-font')?.addEventListener('change', (event) => {
+    const raw = String(event.target?.value || 'system');
+    const next = IPHONE_FONT_STACKS[raw] ? raw : 'system';
+    commitIphoneSetting((settings) => { settings.iphoneFont = next; });
+  });
   document.querySelectorAll('#bs-biotracker-settings [data-device-size-option]').forEach((node) =>
     node.addEventListener('click', () => {
       const settings = getSettings(ctx);
@@ -6572,6 +7038,24 @@ async function ensureModal(ctx) {
     if (!nextModel) return;
     const modelInput = document.getElementById('bs-bt-model');
     if (modelInput) modelInput.value = nextModel;
+  });
+  // 追踪页会整段重绘，族谱按钮用委派监听
+  document.addEventListener('click', (event) => {
+    const trigger = event.target?.closest?.('.bs-bt-lineage-open');
+    if (!trigger) return;
+    event.preventDefault();
+    const centerName = String(trigger.dataset.lineageCenter || '').trim();
+    if (centerName) openLineageWindow(ctx, centerName);
+  });
+  document.addEventListener('input', (event) => {
+    if (event.target?.id === 'bs-bt-api-url') updateApiEndpointPreview();
+  });
+  document.addEventListener('change', (event) => {
+    if (event.target?.id === 'bs-bt-api-format') {
+      updateApiEndpointPreview();
+      try { readSettingsFromForm(ctx); saveSettings(ctx); } catch {}
+      console.log('[BS BioTracker] apiFormat changed ->', normalizeApiFormat(event.target?.value));
+    }
   });
   document.getElementById('bs-bt-tracker-preset-list')?.addEventListener('change', async () => {
     readSettingsFromForm(ctx);
@@ -6971,13 +7455,29 @@ async function ensureModal(ctx) {
       globalThis.toastr?.error?.(message, '[BS BioTracker]');
     }
   });
+  // 勾了才展开该项的设定，收起来时六项就只是一份可读的清单
+  document.querySelector('.bs-bt-special-fetus')?.addEventListener('change', (event) => {
+    const toggle = event.target;
+    if (!(toggle instanceof HTMLInputElement)) return;
+    const key = String(toggle.getAttribute('data-special-toggle') || '');
+    if (!key) return;
+    const body = document.querySelector(`[data-special-body="${key}"]`);
+    if (body) body.hidden = !toggle.checked;
+    if (toggle.checked) body?.querySelector('input')?.focus();
+  });
   document.getElementById('bs-bt-register-run')?.addEventListener('click', async () => {
     // 注册没有节流会重复发送：小手机关掉再打开时按钮看似可点，实际上上一轮还在跑
     if (isRegistryOperationPending('register')) {
       globalThis.toastr?.info?.('[BS BioTracker] 注册请求正在进行中，请等待完成');
       return;
     }
-    const { targetName, declaredRace, customNotes, sourceChild } = getRegisterFormValues();
+    const { targetName, declaredRace, customNotes, sourceChild, specialFetus } = getRegisterFormValues();
+    if (specialFetus?.error) {
+      setRegisterStatus(specialFetus.error, true);
+      globalThis.toastr?.warning?.(specialFetus.error, '[BS BioTracker]');
+      return;
+    }
+    const specialFetusRequest = specialFetus?.request || null;
     if (!targetName) {
       setRegisterStatus('请先输入要注册的角色名。', true);
       globalThis.toastr?.warning?.('[BS BioTracker] 请先输入角色名');
@@ -6998,7 +7498,7 @@ async function ensureModal(ctx) {
       ? `正在使用繁育推演注册 ${targetName}...`
       : `正在注册 ${targetName}...`);
     try {
-      const character = await runRegistry(ctx, { targetName, customNotes, declaredRace, breedingInference, sourceChild });
+      const character = await runRegistry(ctx, { targetName, customNotes, declaredRace, breedingInference, sourceChild, specialFetus: specialFetusRequest });
       renderStatusPanel(ctx);
       renderFullStatePage(ctx);
       renderSkillCatalogPage(ctx);
@@ -7006,9 +7506,14 @@ async function ensureModal(ctx) {
       updateMainFlowPrompt(ctx);
       // 角色已经注册进去了，这份推演草稿才算用完，可以清空
       clearBreedingInferenceDraftFor(character.name);
-      setRegisterStatus(breedingInference
-        ? `注册完成：${character.name}（已套用繁育推演）。可继续备装或写日记。`
-        : `注册完成：${character.name}。可继续备装或写日记。`);
+      // 勾了特殊来历却没产生妊娠时要讲出来：默默当成功，玩家会以为设定生效了
+      const missingSpecial = describeMissingSpecialFetus(specialFetusRequest, character);
+      setRegisterStatus([
+        breedingInference
+          ? `注册完成：${character.name}（已套用繁育推演）。可继续备装或写日记。`
+          : `注册完成：${character.name}。可继续备装或写日记。`,
+        missingSpecial,
+      ].filter(Boolean).join(' '));
       globalThis.toastr?.success?.(`[BS BioTracker] 已注册 ${character.name}`);
     } catch (error) {
       console.error('[BS BioTracker] runRegistry failed', error);

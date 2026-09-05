@@ -3,7 +3,9 @@
 :root {
   --bsbt-pager-bg: #2d3436;
   --bsbt-lcd-bg: #87a96b;
-  --bsbt-lcd-text: #2d3436;
+  /* 原本是 #2d3436（4.78），说明小字降一点不透明度就跌破 AA。压深一档到 5.83，
+     绿屏＋深炭灰的观感不变，但小字有了余量。 */
+  --bsbt-lcd-text: #212526;
   --bsbt-border-color: #1a1a1a;
   --bsbt-font-main: 'Courier New', 'Microsoft JhengHei', 'PingFang TC', 'Noto Sans TC', Courier, monospace;
   --bsbt-btn-grad-1: #4d5456;
@@ -19,10 +21,12 @@
   --bsbt-home-tile-shadow: rgba(0, 0, 0, 0.28);
 }
 
-#bs-biotracker-settings.theme-retro, .bs-bt-floating-sphere.theme-retro {
+#bs-biotracker-settings.theme-retro, .bs-bt-floating-sphere.theme-retro, .bs-bt-lineage.theme-retro {
   --bsbt-pager-bg: #2d3436;
   --bsbt-lcd-bg: #87a96b;
-  --bsbt-lcd-text: #2d3436;
+  /* 原本是 #2d3436（4.78），说明小字降一点不透明度就跌破 AA。压深一档到 5.83，
+     绿屏＋深炭灰的观感不变，但小字有了余量。 */
+  --bsbt-lcd-text: #212526;
   --bsbt-border-color: #1a1a1a;
   --bsbt-font-main: 'Courier New', 'Microsoft JhengHei', 'PingFang TC', 'Noto Sans TC', Courier, monospace;
   --bsbt-btn-grad-1: #4d5456;
@@ -38,7 +42,7 @@
   --bsbt-home-tile-shadow: rgba(0, 0, 0, 0.28);
 }
 
-#bs-biotracker-settings.theme-cultivation, .bs-bt-floating-sphere.theme-cultivation {
+#bs-biotracker-settings.theme-cultivation, .bs-bt-floating-sphere.theme-cultivation, .bs-bt-lineage.theme-cultivation {
   --bsbt-pager-bg: linear-gradient(135deg, #1a3c34 0%, #2d5a4e 50%, #1a3c34 100%);
   --bsbt-lcd-bg: #e0f2f1;
   --bsbt-lcd-text: #004d40;
@@ -57,7 +61,7 @@
   --bsbt-home-tile-shadow: rgba(0, 50, 44, 0.35);
 }
 
-#bs-biotracker-settings.theme-fantasy, .bs-bt-floating-sphere.theme-fantasy {
+#bs-biotracker-settings.theme-fantasy, .bs-bt-floating-sphere.theme-fantasy, .bs-bt-lineage.theme-fantasy {
   --bsbt-pager-bg: #4e342e;
   --bsbt-lcd-bg: #f5e6c8;
   --bsbt-lcd-text: #3e2723;
@@ -76,7 +80,7 @@
   --bsbt-home-tile-shadow: rgba(31, 20, 17, 0.4);
 }
 
-#bs-biotracker-settings.theme-cyber-egypt, .bs-bt-floating-sphere.theme-cyber-egypt {
+#bs-biotracker-settings.theme-cyber-egypt, .bs-bt-floating-sphere.theme-cyber-egypt, .bs-bt-lineage.theme-cyber-egypt {
   --bsbt-pager-bg: linear-gradient(45deg, #d4af37, #f1c40f, #d4af37);
   --bsbt-lcd-bg: #00f2ff;
   --bsbt-lcd-text: #002b2b;
@@ -95,7 +99,7 @@
   --bsbt-home-tile-shadow: rgba(84, 67, 0, 0.38);
 }
 
-#bs-biotracker-settings.theme-wasteland, .bs-bt-floating-sphere.theme-wasteland {
+#bs-biotracker-settings.theme-wasteland, .bs-bt-floating-sphere.theme-wasteland, .bs-bt-lineage.theme-wasteland {
   --bsbt-pager-bg: #515c30;
   --bsbt-lcd-bg: #0d120a;
   --bsbt-lcd-text: #18ff62;
@@ -114,10 +118,12 @@
   --bsbt-home-tile-shadow: rgba(13, 18, 10, 0.55);
 }
 
-#bs-biotracker-settings.theme-sakura, .bs-bt-floating-sphere.theme-sakura {
+#bs-biotracker-settings.theme-sakura, .bs-bt-floating-sphere.theme-sakura, .bs-bt-lineage.theme-sakura {
   --bsbt-pager-bg: linear-gradient(to bottom, #ffffff, #f8bbd0);
   --bsbt-lcd-bg: #ffffff;
-  --bsbt-lcd-text: #ff4081;
+  /* 原本是 #ff4081，在纯白屏上只有 3.33，标签与说明小字一起不达 AA。
+     换成同系的深玫瑰（与按钮字色 #ad1457 同族）后升到 5.87，粉色调不变。 */
+  --bsbt-lcd-text: #c2185b;
   --bsbt-border-color: #f8bbd0;
   --bsbt-font-main: 'Chewy', 'ZCOOL KuaiLe', 'Microsoft JhengHei', 'PingFang TC', 'Noto Sans TC', sans-serif;
   --bsbt-btn-grad-1: #ffffff;
@@ -133,7 +139,7 @@
   --bsbt-home-tile-shadow: rgba(173, 20, 87, 0.18);
 }
 
-#bs-biotracker-settings.theme-holo, .bs-bt-floating-sphere.theme-holo {
+#bs-biotracker-settings.theme-holo, .bs-bt-floating-sphere.theme-holo, .bs-bt-lineage.theme-holo {
   --bsbt-pager-bg: rgba(2, 18, 36, 0.18);
   --bsbt-lcd-bg: rgba(3, 28, 52, 0.22);
   --bsbt-lcd-text: #8df7ff;
@@ -155,7 +161,7 @@
   --bsbt-home-tile-shadow: rgba(17, 197, 255, 0.22);
 }
 
-#bs-biotracker-settings.theme-gothic, .bs-bt-floating-sphere.theme-gothic {
+#bs-biotracker-settings.theme-gothic, .bs-bt-floating-sphere.theme-gothic, .bs-bt-lineage.theme-gothic {
   --bsbt-pager-bg:
     radial-gradient(circle at 50% 0%, rgba(137, 60, 76, 0.34), transparent 34%),
     linear-gradient(155deg, #22141f 0%, #110911 46%, #2b1119 100%);
@@ -180,7 +186,7 @@
   --bsbt-home-tile-shadow: rgba(8, 3, 8, 0.56);
 }
 
-#bs-biotracker-settings.theme-steampunk, .bs-bt-floating-sphere.theme-steampunk {
+#bs-biotracker-settings.theme-steampunk, .bs-bt-floating-sphere.theme-steampunk, .bs-bt-lineage.theme-steampunk {
   --bsbt-pager-bg:
     radial-gradient(circle at 12% 10%, rgba(209, 168, 90, 0.22), transparent 28%),
     radial-gradient(circle at 88% 90%, rgba(138, 75, 45, 0.22), transparent 26%),
@@ -206,7 +212,7 @@
   --bsbt-home-tile-shadow: rgba(42, 27, 18, 0.42);
 }
 
-#bs-biotracker-settings.theme-eldritch, .bs-bt-floating-sphere.theme-eldritch {
+#bs-biotracker-settings.theme-eldritch, .bs-bt-floating-sphere.theme-eldritch, .bs-bt-lineage.theme-eldritch {
   --bsbt-pager-bg:
     radial-gradient(circle at 16% 12%, rgba(91, 59, 115, 0.28), transparent 30%),
     radial-gradient(circle at 84% 86%, rgba(104, 214, 194, 0.16), transparent 28%),
@@ -232,7 +238,7 @@
   --bsbt-home-tile-shadow: rgba(3, 7, 6, 0.58);
 }
 
-#bs-biotracker-settings.theme-ink, .bs-bt-floating-sphere.theme-ink {
+#bs-biotracker-settings.theme-ink, .bs-bt-floating-sphere.theme-ink, .bs-bt-lineage.theme-ink {
   --bsbt-pager-bg:
     radial-gradient(ellipse at 50% 12%, rgba(31, 37, 34, 0.1), transparent 30%),
     linear-gradient(90deg, #c9b98f 0 5%, #f3ead8 5% 95%, #c9b98f 95% 100%);
@@ -256,7 +262,206 @@
   --bsbt-home-tile-shadow: rgba(31, 37, 34, 0.16);
 }
 
-#bs-biotracker-settings.theme-constructivism, .bs-bt-floating-sphere.theme-constructivism {
+/* ── 樱花：水钻装饰 ────────────────────────────────────────
+   樱花本来是唯一一套完全没有装饰层的主题（哥特／蒸汽／赛博埃及／克苏鲁都有
+   ::before 花纹），而它已经是粉底＋圆体字＋50px 大圆角，水钻正是它缺的那块。
+   钻贴在萤幕边框上——真的贴水钻的手机就是框萤幕，而且边框是直边，
+   不像机身四角有 50px 圆角会把直排的钻切断。 */
+#bs-biotracker-settings.theme-sakura .bs-bt-screen-shell {
+  position: relative;
+}
+
+/* 萤幕预设是 content-box，12px 边框往外长，於是它比容器高 24px、还压在按键列上
+   （所有主题都有这个错位）。贝壳机要有一条乾净的铰链缝，所以这里改成 border-box：
+   萤幕边界与容器对齐，钻框用 inset: 0 就正好贴在边框上，上下壳也才切得开。 */
+#bs-biotracker-settings.theme-sakura .bs-bt-screen {
+  box-sizing: border-box;
+}
+
+/* 单颗钻的切面：同心的亮环比单一柔和高光更像水钻——
+   珍珠是一个软光点，水钻是一圈圈硬边反光。中心受光点偏左上。 */
+#bs-biotracker-settings.theme-sakura {
+  --bsbt-gem-big: radial-gradient(circle at 50% 50%,
+    rgba(255, 255, 255, 0.98) 0 9%,
+    rgba(255, 209, 233, 0.45) 9% 27%,
+    rgba(255, 255, 255, 0.95) 27% 33%,
+    rgba(240, 130, 180, 0.4) 33% 42%,
+    rgba(255, 255, 255, 0.88) 42% 47%,
+    rgba(214, 80, 145, 0.5) 47% 50%,
+    transparent 51%);
+  --bsbt-gem-small: radial-gradient(circle at 44% 38%,
+    rgba(255, 255, 255, 1) 0 16%,
+    rgba(255, 255, 255, 0.5) 16% 34%,
+    rgba(255, 246, 250, 0.85) 34% 46%,
+    rgba(214, 80, 145, 0.42) 46% 50%,
+    transparent 51%);
+  --bsbt-gem-a: 12px;
+  --bsbt-gem-b: 7px;
+}
+
+/* 大钻排一圈，小钻错开半格塞在缝里——等距同尺寸会读成虚线，
+   两种大小交错才像一颗颗贴上去的。 */
+#bs-biotracker-settings.theme-sakura .bs-bt-screen-shell::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  border-radius: 20px;
+  background:
+    var(--bsbt-gem-big) repeat-x left top / var(--bsbt-gem-a) var(--bsbt-gem-a),
+    var(--bsbt-gem-big) repeat-x left bottom / var(--bsbt-gem-a) var(--bsbt-gem-a),
+    var(--bsbt-gem-big) repeat-y left top / var(--bsbt-gem-a) var(--bsbt-gem-a),
+    var(--bsbt-gem-big) repeat-y right top / var(--bsbt-gem-a) var(--bsbt-gem-a),
+    var(--bsbt-gem-small) repeat-x 6px 3px / var(--bsbt-gem-b) var(--bsbt-gem-b),
+    var(--bsbt-gem-small) repeat-x 6px calc(100% - 3px) / var(--bsbt-gem-b) var(--bsbt-gem-b),
+    var(--bsbt-gem-small) repeat-y 3px 6px / var(--bsbt-gem-b) var(--bsbt-gem-b),
+    var(--bsbt-gem-small) repeat-y calc(100% - 3px) 6px / var(--bsbt-gem-b) var(--bsbt-gem-b);
+}
+
+/* ── 樱花：贝壳机造型 ──────────────────────────────────────
+   真正的翻盖是「上半萤幕、下半键盘」，但那会把内容区从 351px 挤到 160px 左右，
+   为造型毁掉可用性。这里只做「暗示」：铰链缝压在萤幕结束、按键列开始那条现成的
+   分界上，上下壳给两种明度，两侧加铰链圆柱，三颗键改厚实键盘键。零萤幕成本。 */
+#bs-biotracker-settings.theme-sakura .bs-bt-physical-buttons {
+  position: relative;
+  z-index: 1;
+  /* 抵销机身 25px 内距，让下壳铺满整个宽度并接上机身底部的圆角 */
+  margin: 0 -25px -25px;
+  padding: 22px 25px 25px;
+  background: linear-gradient(to bottom, #f9a8c6, #f18cb4);
+  border-top: 2px solid rgba(255, 255, 255, 0.85);
+  border-radius: 0 0 48px 48px;
+  box-shadow: inset 0 6px 10px -6px rgba(173, 20, 87, 0.35);
+}
+
+/* 铰链圆柱：卡在缝的两端，是最能读出「这东西会对折」的一笔 */
+#bs-biotracker-settings.theme-sakura .bs-bt-physical-buttons::before,
+#bs-biotracker-settings.theme-sakura .bs-bt-physical-buttons::after {
+  content: '';
+  position: absolute;
+  top: -7px;
+  width: 26px;
+  height: 13px;
+  border-radius: 7px;
+  background: linear-gradient(to bottom, #ffffff 0 38%, #f7a3c3 38% 62%, #dd6f9e 62% 100%);
+  box-shadow: 0 1px 2px rgba(173, 20, 87, 0.3);
+}
+
+#bs-biotracker-settings.theme-sakura .bs-bt-physical-buttons::before {
+  left: 12px;
+}
+
+#bs-biotracker-settings.theme-sakura .bs-bt-physical-buttons::after {
+  right: 12px;
+}
+
+/* 下壳上的键改成厚实的键盘键 */
+#bs-biotracker-settings.theme-sakura .bs-bt-physical-button,
+#bs-biotracker-settings.theme-sakura .bs-bt-physical-button-off {
+  border-radius: 999px;
+  box-shadow:
+    0 3px 0 #d4699a,
+    0 4px 6px rgba(173, 20, 87, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9);
+}
+
+/* ── iPhone 主题 ────────────────────────────────────────────
+   其余 12 套是固定美术风格，配色属于主题本身；这一套刻意留白，
+   强调色与字体交给使用者，用 :root 上的 --bsbt-user-* 覆写。
+   放在 :root 是因为面板、浮球、族谱视窗是三个独立挂载点，
+   写在 documentElement 上三边都继承得到，不必各自设一次。 */
+#bs-biotracker-settings.theme-iphone, .bs-bt-floating-sphere.theme-iphone, .bs-bt-lineage.theme-iphone {
+  --bsbt-accent: var(--bsbt-user-accent, #0a84ff);
+  --bsbt-case: var(--bsbt-user-case, #c8c2b8);
+  /* 机身材质。由外而内叠五层，全部用 color-mix 从使用者选的机身色推导，
+     所以换任何颜色都成立，不必每个配色各写一份：
+     1 拉丝纹  2 玻璃背板的柔光  3 底部压暗（厚度）  4 钛金属边框左右两道高光  5 底色 */
+  --bsbt-pager-bg:
+    repeating-linear-gradient(93deg,
+      color-mix(in srgb, #fff 5%, transparent) 0 1px,
+      transparent 1px 3px),
+    radial-gradient(125% 85% at 24% 6%,
+      color-mix(in srgb, #fff 30%, transparent),
+      transparent 58%),
+    linear-gradient(180deg,
+      transparent 52%,
+      color-mix(in srgb, #000 15%, transparent) 100%),
+    linear-gradient(90deg,
+      color-mix(in srgb, #fff 62%, var(--bsbt-case)) 0 0.7%,
+      color-mix(in srgb, #000 16%, var(--bsbt-case)) 1.8% 3.4%,
+      var(--bsbt-case) 6.5% 93.5%,
+      color-mix(in srgb, #000 16%, var(--bsbt-case)) 96.6% 98.2%,
+      color-mix(in srgb, #fff 62%, var(--bsbt-case)) 99.3% 100%),
+    var(--bsbt-case);
+  --bsbt-lcd-bg: #ffffff;
+  --bsbt-lcd-text: #1c1c1e;
+  --bsbt-border-color: rgba(60, 60, 67, 0.20);
+  --bsbt-font-main: var(--bsbt-user-font, -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang TC', 'Microsoft JhengHei', 'Noto Sans TC', system-ui, sans-serif);
+  --bsbt-btn-grad-1: #ffffff;
+  --bsbt-btn-grad-2: #f2f2f7;
+  --bsbt-btn-text: var(--bsbt-accent);
+  --bsbt-off-bg: #e5e5ea;
+  --bsbt-off-text: #1c1c1e;
+  --bsbt-case-radius: 46px;
+  /* 内侧上下各一道细高光/暗边：金属边框的转角反光，机身才不像一块贴纸 */
+  --bsbt-case-shadow:
+    0 24px 48px rgba(0, 0, 0, 0.30),
+    0 3px 10px rgba(0, 0, 0, 0.18),
+    inset 0 1px 0 color-mix(in srgb, #fff 55%, transparent),
+    inset 0 -1px 0 color-mix(in srgb, #000 28%, transparent);
+  --bsbt-case-border: 1px solid color-mix(in srgb, #000 22%, var(--bsbt-case));
+  --bsbt-home-tile-bg: #ffffff;
+  --bsbt-home-tile-glow: color-mix(in srgb, var(--bsbt-accent) 22%, transparent);
+  --bsbt-home-tile-shadow: rgba(0, 0, 0, 0.10);
+}
+
+:root[data-bsbt-iphone-base="dark"] #bs-biotracker-settings.theme-iphone,
+:root[data-bsbt-iphone-base="dark"] .bs-bt-floating-sphere.theme-iphone,
+:root[data-bsbt-iphone-base="dark"] .bs-bt-lineage.theme-iphone {
+  --bsbt-pager-bg: #000000;
+  --bsbt-lcd-bg: #1c1c1e;
+  --bsbt-lcd-text: #f2f2f7;
+  --bsbt-border-color: rgba(84, 84, 88, 0.68);
+  --bsbt-btn-grad-1: #2c2c2e;
+  --bsbt-btn-grad-2: #1c1c1e;
+  --bsbt-off-bg: #2c2c2e;
+  --bsbt-off-text: #f2f2f7;
+  --bsbt-home-tile-bg: #1c1c1e;
+  --bsbt-home-tile-shadow: rgba(0, 0, 0, 0.6);
+}
+
+/* 萤幕：黑边框 + 圆角，拿掉其他主题的 CRT 扫描线与内阴影——OLED 上不该有这些 */
+#bs-biotracker-settings.theme-iphone .bs-bt-screen {
+  border-width: 5px;
+  border-color: #0a0a0c;
+  border-radius: 32px;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.05),
+    0 0 0 1px color-mix(in srgb, #000 30%, transparent);
+}
+
+#bs-biotracker-settings.theme-iphone .bs-bt-screen::after {
+  display: none;
+}
+
+/* 机身顶端的品牌字改画成灵动岛：这是最好认的 iPhone 特徵，
+   而且刚好占用 brand 原本的位置，不必动 HTML 结构 */
+#bs-biotracker-settings.theme-iphone .bs-bt-brand {
+  width: 84px;
+  height: 20px;
+  margin: 2px auto 10px;
+  border-radius: 999px;
+  background: #0a0a0c;
+  font-size: 0;
+  color: transparent;
+  overflow: hidden;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.06),
+    0 1px 2px rgba(0, 0, 0, 0.35);
+}
+
+#bs-biotracker-settings.theme-constructivism, .bs-bt-floating-sphere.theme-constructivism, .bs-bt-lineage.theme-constructivism {
   --bsbt-pager-bg:
     repeating-linear-gradient(90deg, rgba(236, 227, 207, 0.05) 0 1px, transparent 1px 10px),
     linear-gradient(135deg, rgba(182, 37, 37, 0.24) 0 17%, transparent 17%),
@@ -791,15 +996,16 @@
   color: inherit;
 }
 
-/* 设置项下方的小字解释：宿主默认 small 是低对比灰，在浅色屏上几乎不可读；
-   统一用辅助文字色（各主题经 --bsbt-off-text 自适应）保证可读性 */
+/* 设置项下方的小字解释：宿主默认 small 是低对比灰，在浅色屏上几乎不可读，所以要覆盖。
+   跟随所在表面的文字色再降一点不透明度——不能用 --bsbt-off-text，那是关机层
+   （--bsbt-off-bg）的配套色，画在屏幕背景上会出现樱花主题的白字白底。 */
 #bs-biotracker-settings .settings_section small {
-  color: var(--bsbt-off-text);
+  color: inherit;
+  opacity: 0.9;
   font-size: 11.5px;
   line-height: 1.45;
   display: block;
   margin-top: 4px;
-  opacity: 0.95;
 }
 
 #bs-biotracker-settings .sysHR {
@@ -3685,13 +3891,121 @@
   gap: 8px;
 }
 
-#bs-biotracker-settings .bs-bt-wardrobe-pressure-tag {
-  border: 1px solid color-mix(in srgb, var(--bsbt-lcd-text) 24%, transparent);
-  border-radius: 999px;
-  padding: 2px 7px;
-  font-size: 0.78em;
+/* ── 孕期衣着压力 ──────────────────────────────────────────
+   四个维度共用同一条压力刻线：长条是该维度的衣物总值，刻线是当前压力，
+   条子没顶到刻线就补一段红色缺口。四个刻线在同一个 x 位置，
+   「哪几维没到线」是扫一眼就看得出来的，不必逐个读数字。 */
+#bs-biotracker-settings .bs-bt-pregfit {
+  border: 1px solid color-mix(in srgb, var(--bsbt-lcd-text) 20%, transparent);
+  border-radius: 8px;
+  padding: 8px 10px 7px;
+  display: grid;
+  gap: 8px;
+}
+
+#bs-biotracker-settings .bs-bt-pregfit__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+#bs-biotracker-settings .bs-bt-pregfit__label {
+  font-size: 0.82em;
   color: color-mix(in srgb, var(--bsbt-lcd-text) 78%, transparent);
-  white-space: nowrap;
+}
+
+#bs-biotracker-settings .bs-bt-pregfit__value {
+  font-weight: 800;
+  font-size: 1.02em;
+}
+
+#bs-biotracker-settings .bs-bt-pregfit__scale {
+  font-weight: 400;
+  font-size: 0.78em;
+  opacity: 0.55;
+  margin-left: 1px;
+}
+
+/* 固定两栏：四个维度永远排成 2x2，不随可用宽度忽宽忽窄地重新断行 */
+#bs-biotracker-settings .bs-bt-pregfit__dims {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 7px 12px;
+}
+
+#bs-biotracker-settings .bs-bt-pregfit__dim-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 0.74em;
+  margin-bottom: 3px;
+}
+
+#bs-biotracker-settings .bs-bt-pregfit__dim-label {
+  color: color-mix(in srgb, var(--bsbt-lcd-text) 70%, transparent);
+}
+
+#bs-biotracker-settings .bs-bt-pregfit__dim-value {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: color-mix(in srgb, var(--bsbt-lcd-text) 85%, transparent);
+}
+
+/* 压不住的那一维只加粗，不改字色。
+   固定玫红在 12 套主题上量过：最好的 sakura 5.13，最差的 retro 只有 1.93——
+   红配绿是「色相很跳但亮度几乎相同」的组合。而任何字色的对比度上限就是该主题
+   本文色本身（retro 4.78、sakura 3.33），换个红也救不了。
+   告警信号交给下面那条红色缺口——填色块头大，色相在那里才真的有用。 */
+#bs-biotracker-settings .bs-bt-pregfit__dim.is-short .bs-bt-pregfit__dim-value {
+  font-weight: 800;
+}
+
+#bs-biotracker-settings .bs-bt-pregfit__track {
+  position: relative;
+  height: 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bsbt-lcd-text) 13%, transparent);
+  overflow: hidden;
+}
+
+#bs-biotracker-settings .bs-bt-pregfit__fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--bsbt-lcd-text) 55%, transparent);
+}
+
+/* 顶不到刻线的那一段：直接把差额画出来，不用整格变红去喊。
+   斜纹用本文色画——玫红底在 retro（对轨道 1.34）、ink（2.65）这类主题上几乎看不见，
+   靠纹路而不是靠色相，任何主题都分得出这一截和填满的部分不一样。 */
+#bs-biotracker-settings .bs-bt-pregfit__deficit {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background:
+    repeating-linear-gradient(
+      135deg,
+      color-mix(in srgb, var(--bsbt-lcd-text) 62%, transparent) 0 2px,
+      transparent 2px 5px
+    ),
+    rgba(226, 52, 108, 0.62);
+}
+
+#bs-biotracker-settings .bs-bt-pregfit__tick {
+  position: absolute;
+  top: -1px;
+  bottom: -1px;
+  width: 2px;
+  margin-left: -1px;
+  background: color-mix(in srgb, var(--bsbt-lcd-text) 88%, transparent);
+}
+
+#bs-biotracker-settings .bs-bt-pregfit__legend {
+  font-size: 0.68em;
+  opacity: 0.55;
+  line-height: 1.3;
 }
 
 #bs-biotracker-settings .bs-bt-wardrobe-summary {
@@ -3900,7 +4214,6 @@
   font-weight: 700;
 }
 
-
 /* History regex pipeline */
 .bs-bt-history-regex-settings {
   border: 1px solid var(--SmartThemeBorderColor, rgba(255,255,255,.15));
@@ -4035,4 +4348,593 @@
 }
 .bs-bt-history-regex-preview-range .text_pole {
   width: 110px;
+}
+
+/* ── iPhone 主题的自订面板 ────────────────────────────────
+   只在选中「果机」主题时显示（applyTheme → syncIphonePanel 控制 hidden）。 */
+#bs-biotracker-settings .bs-bt-iphone-panel[hidden] {
+  display: none;
+}
+
+#bs-biotracker-settings .bs-bt-accent-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+#bs-biotracker-settings .bs-bt-accent-swatch {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  background: var(--swatch);
+  cursor: pointer;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--bsbt-lcd-text) 25%, transparent);
+}
+
+#bs-biotracker-settings .bs-bt-accent-swatch.is-active {
+  border-color: var(--bsbt-lcd-text);
+  box-shadow: 0 0 0 1px var(--bsbt-lcd-bg);
+}
+
+#bs-biotracker-settings .bs-bt-accent-picker {
+  width: 34px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--bsbt-lcd-text) 30%, transparent);
+  border-radius: 6px;
+  background: none;
+  cursor: pointer;
+}
+
+/* ── 胎儿标签 ──────────────────────────────────────────────
+   标注这颗胎儿是怎么来的（嵌合／代孕／自交／同卵…）。没有标签时整列不渲染。 */
+#bs-biotracker-settings .bs-bt-fetus-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+#bs-biotracker-settings .bs-bt-fetus-tag {
+  border: 1px solid color-mix(in srgb, var(--bsbt-lcd-text) 30%, transparent);
+  background: color-mix(in srgb, var(--bsbt-lcd-text) 9%, transparent);
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 0.7em;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+/* ── 精液来源占比环 ────────────────────────────────────────
+   同一个 currentColor 的阶梯透明度 + 分隔缺口，不引入新色盘，
+   12 套主题下都读得出来。 */
+#bs-biotracker-settings .bs-bt-sperm-share {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+#bs-biotracker-settings .bs-bt-sperm-share__ring {
+  flex: 0 0 auto;
+  width: 84px;
+  height: 84px;
+}
+
+#bs-biotracker-settings .bs-bt-sperm-share__total {
+  font-size: 15px;
+  font-weight: 700;
+  fill: currentColor;
+}
+
+#bs-biotracker-settings .bs-bt-sperm-share__unit {
+  font-size: 8px;
+  fill: currentColor;
+  opacity: 0.7;
+}
+
+#bs-biotracker-settings .bs-bt-sperm-share__legend {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+#bs-biotracker-settings .bs-bt-sperm-share__row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.76rem;
+  padding: 2px 0;
+}
+
+#bs-biotracker-settings .bs-bt-sperm-share__swatch {
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  background: currentColor;
+}
+
+#bs-biotracker-settings .bs-bt-sperm-share__name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#bs-biotracker-settings .bs-bt-sperm-share__pct {
+  flex: 0 0 auto;
+  font-weight: 700;
+}
+
+#bs-biotracker-settings .bs-bt-sperm-share__val {
+  flex: 0 0 auto;
+  opacity: 0.65;
+  min-width: 26px;
+  text-align: right;
+}
+
+/* ── 血缘视窗 ──────────────────────────────────────────────
+   独立全屏覆盖层，挂在 body 下（与浮球同样自带主题 class），
+   不放进面板内部以免被 modal 的 transform 困住 position: fixed。
+   版面走「分代横排 + 手足成丛」：同一对亲代的孩子聚成一丛，
+   丛上方挂亲代标注，再用一条横杆与各自的竖线连到每张卡。 */
+.bs-bt-lineage {
+  position: fixed;
+  inset: 0;
+  z-index: 10050;
+  display: none;
+  flex-direction: column;
+  background: var(--bsbt-pager-bg);
+  color: var(--bsbt-off-text);
+  font-family: var(--bsbt-font-main);
+  --bsbt-lin-card: 116px;
+  --bsbt-lin-gap: 12px;
+}
+
+.bs-bt-lineage.is-open {
+  display: flex;
+}
+
+.bs-bt-lineage__head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--bsbt-border-color);
+  background: var(--bsbt-lcd-bg);
+  color: var(--bsbt-lcd-text);
+  flex: 0 0 auto;
+}
+
+.bs-bt-lineage__title {
+  font-weight: 700;
+  font-size: 1rem;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bs-bt-lineage__hint {
+  font-size: 0.72rem;
+  opacity: 0.7;
+  flex: 0 0 auto;
+}
+
+.bs-bt-lineage__close {
+  flex: 0 0 auto;
+  min-width: 40px;
+  height: 32px;
+  border-radius: 8px;
+  border: 1px solid var(--bsbt-border-color);
+  background: var(--bsbt-off-bg);
+  color: var(--bsbt-off-text);
+  font-size: 1rem;
+  cursor: pointer;
+}
+
+/* 主体：手机上图与详情上下堆叠，宽屏并排 */
+.bs-bt-lineage__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.bs-bt-lineage__chart {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 14px 12px 20px;
+}
+
+.bs-bt-lineage__row {
+  margin-bottom: 22px;
+}
+
+/* 世代分隔线：标签居中，两侧拉细线，让每一代自成一层 */
+.bs-bt-lineage__row-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+  font-size: 0.7rem;
+  letter-spacing: 0.14em;
+  opacity: 0.62;
+}
+
+.bs-bt-lineage__row-label::before,
+.bs-bt-lineage__row-label::after {
+  content: '';
+  flex: 1 1 auto;
+  height: 1px;
+  background: currentColor;
+  opacity: 0.35;
+}
+
+/* 窄屏放不下就整列横向卷动；用 max-content + min-width 让内容少时仍居中 */
+.bs-bt-lineage__row-scroll {
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.bs-bt-lineage__clusters {
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  gap: 26px;
+  width: max-content;
+  min-width: 100%;
+}
+
+.bs-bt-lineage__cluster {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.bs-bt-lineage__cluster-parents {
+  position: relative;
+  margin-bottom: 16px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--bsbt-border-color);
+  background: var(--bsbt-off-bg);
+  font-size: 0.68rem;
+  opacity: 0.85;
+  white-space: nowrap;
+}
+
+/* 亲代标注往下垂一段，接上手足横杆 */
+.bs-bt-lineage__cluster-parents::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  width: 2px;
+  height: 16px;
+  background: currentColor;
+  opacity: 0.4;
+}
+
+.bs-bt-lineage__cluster-cards {
+  display: flex;
+  gap: var(--bsbt-lin-gap);
+  position: relative;
+}
+
+/* 手足横杆：两端各内缩半张卡宽，正好落在头尾两张卡的中线上；
+   只有一张卡时宽度归零，剩竖线一条。 */
+.bs-bt-lineage__cluster-cards.has-link {
+  padding-top: 16px;
+}
+
+.bs-bt-lineage__cluster-cards.has-link::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: calc(var(--bsbt-lin-card) / 2);
+  right: calc(var(--bsbt-lin-card) / 2);
+  height: 2px;
+  background: currentColor;
+  opacity: 0.4;
+}
+
+.bs-bt-lineage__cluster-cards.has-link .bs-bt-lineage__card::before {
+  content: '';
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  width: 2px;
+  height: 16px;
+  background: currentColor;
+  opacity: 0.4;
+}
+
+.bs-bt-lineage__card {
+  position: relative;
+  flex: 0 0 auto;
+  width: var(--bsbt-lin-card);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 12px 8px 10px;
+  border-radius: 14px;
+  border: 1px solid var(--bsbt-border-color);
+  background: var(--bsbt-off-bg);
+  color: var(--bsbt-off-text);
+  font-family: inherit;
+  cursor: pointer;
+  box-shadow: 0 2px 0 rgba(0, 0, 0, 0.25);
+}
+
+.bs-bt-lineage__card[disabled] {
+  cursor: default;
+}
+
+.bs-bt-lineage__card.is-ghost {
+  border-style: dashed;
+}
+
+/* 没有头像素材，用姓名首字做纪念章式的肖像牌 */
+.bs-bt-lineage__portrait {
+  position: relative;
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  border: 2px solid var(--bsbt-border-color);
+  background: var(--bsbt-lcd-bg);
+  color: var(--bsbt-lcd-text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 4px;
+}
+
+.bs-bt-lineage__card.is-ghost .bs-bt-lineage__portrait {
+  opacity: 0.55;
+}
+
+.bs-bt-lineage__initial {
+  font-size: 0.95rem;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -0.02em;
+}
+
+.bs-bt-lineage__sex {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  min-width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  border: 1px solid var(--bsbt-border-color);
+  background: var(--bsbt-off-bg);
+  color: var(--bsbt-off-text);
+  font-size: 0.66rem;
+  line-height: 15px;
+  text-align: center;
+}
+
+.bs-bt-lineage__card-name {
+  max-width: 100%;
+  font-weight: 700;
+  font-size: 0.82rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bs-bt-lineage__card-sub {
+  max-width: 100%;
+  font-size: 0.66rem;
+  opacity: 0.7;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 年龄独立一行，接在种族下面。未注册的路人没有年龄资料，
+   但这一行照样保留高度——否则同一排里有年龄和没年龄的卡片会高低不齐。
+   用 min-height 而不是给卡片写死高度：不必为每个断点各猜一个数字。 */
+.bs-bt-lineage__card-age {
+  min-height: 13px;
+  /* 明写行高：空的那一行若靠字体预设行高，会跟有字的差 1px */
+  line-height: 13px;
+  max-width: 100%;
+  font-size: 0.64rem;
+  opacity: 0.55;
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bs-bt-lineage__badge {
+  position: absolute;
+  top: -9px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--bsbt-border-color);
+  background: var(--bsbt-lcd-bg);
+  color: var(--bsbt-lcd-text);
+  font-size: 0.6rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.bs-bt-lineage__card.is-center {
+  border-color: var(--bsbt-lcd-bg);
+  border-width: 2px;
+  padding: 11px 7px 9px;
+}
+
+/* 选取驱动的高亮：平常不画跨代的边，点某人才亮出他的亲代与子代，
+   否则分代横排上每条边都画会变成一团面条 */
+.bs-bt-lineage__card.is-selected {
+  outline: 2px solid var(--bsbt-lcd-bg);
+  outline-offset: 2px;
+}
+
+.bs-bt-lineage__card.is-related {
+  border-color: var(--bsbt-lcd-bg);
+}
+
+.bs-bt-lineage.has-selection .bs-bt-lineage__card:not(.is-selected):not(.is-related) {
+  opacity: 0.38;
+}
+
+.bs-bt-lineage__detail {
+  flex: 0 0 auto;
+  max-height: 42%;
+  overflow: auto;
+  padding: 10px 14px 14px;
+  border-top: 1px solid var(--bsbt-border-color);
+  background: var(--bsbt-lcd-bg);
+  color: var(--bsbt-lcd-text);
+}
+
+.bs-bt-lineage__detail-title {
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+
+.bs-bt-lineage__detail-row {
+  display: flex;
+  gap: 10px;
+  font-size: 0.78rem;
+  padding: 3px 0;
+  border-bottom: 1px dashed var(--bsbt-border-color);
+}
+
+.bs-bt-lineage__detail-label {
+  flex: 0 0 78px;
+  opacity: 0.7;
+}
+
+.bs-bt-lineage__detail-value {
+  flex: 1 1 auto;
+  word-break: break-word;
+}
+
+.bs-bt-lineage__empty {
+  padding: 24px 14px;
+  text-align: center;
+  opacity: 0.7;
+}
+
+/* 平板以上：图与详情并排，详情固定在右侧 */
+@media (min-width: 768px) {
+  .bs-bt-lineage__body {
+    flex-direction: row;
+  }
+  .bs-bt-lineage__chart {
+    flex: 1 1 auto;
+    padding: 18px 20px 24px;
+  }
+  .bs-bt-lineage__detail {
+    flex: 0 0 300px;
+    max-height: none;
+    border-top: 0;
+    border-left: 1px solid var(--bsbt-border-color);
+  }
+}
+
+/* 桌机：给节点更多呼吸空间 */
+@media (min-width: 1200px) {
+  .bs-bt-lineage {
+    --bsbt-lin-card: 138px;
+    --bsbt-lin-gap: 16px;
+  }
+  .bs-bt-lineage__chart {
+    padding: 22px 28px 28px;
+  }
+  .bs-bt-lineage__row {
+    margin-bottom: 28px;
+  }
+  .bs-bt-lineage__portrait {
+    width: 54px;
+    height: 54px;
+  }
+  .bs-bt-lineage__initial {
+    font-size: 1.08rem;
+  }
+  .bs-bt-lineage__detail {
+    flex: 0 0 360px;
+  }
+}
+
+/* 注册页的特殊胎儿来历：默认收合，因为注册不一定产生怀孕，多数时候用不到 */
+.bs-bt-special-fetus > summary {
+  cursor: pointer;
+  font-weight: 600;
+  padding: 4px 0;
+}
+.bs-bt-special-fetus[open] > summary {
+  margin-bottom: 6px;
+}
+
+/* 六项一律同一种版型：勾选列＋展开的设定区，免得硬套与提示两类长得不一样 */
+.bs-bt-special-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0;
+}
+.bs-bt-special-item {
+  border: 1px solid rgba(128, 128, 128, 0.28);
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+.bs-bt-special-item:has(.bs-bt-special-body:not([hidden]))  {
+  border-color: rgba(128, 128, 128, 0.55);
+}
+.bs-bt-special-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  margin: 0;
+}
+.bs-bt-special-name {
+  flex: 1 1 auto;
+}
+/* 一律吃继承来的文字颜色：13 套主题各有各的背景，任何写死的色相都可能在某一套里糊掉。
+   两种模式靠字重与边框粗细区分，不靠颜色。 */
+.bs-bt-special-mode {
+  flex: 0 0 auto;
+  font-size: 0.78em;
+  color: inherit;
+  opacity: 0.92;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  padding: 0 7px;
+  line-height: 1.6;
+}
+.bs-bt-special-mode[data-mode="hard"] {
+  font-weight: 600;
+  border-width: 2px;
+}
+.bs-bt-special-body {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 6px;
+  padding-left: 24px;
+}
+/* display:flex 会盖掉 [hidden] 的 display:none，必须自己关掉 */
+.bs-bt-special-body[hidden] {
+  display: none;
+}
+.bs-bt-special-body small {
+  opacity: 0.8;
 }

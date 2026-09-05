@@ -124,13 +124,55 @@
               <button type="button" class="bs-bt-theme-option" data-theme-option="fantasy">3. 奇幻 (Fantasy)</button>
               <button type="button" class="bs-bt-theme-option" data-theme-option="cyber-egypt">4. 埃及 (Cyber)</button>
               <button type="button" class="bs-bt-theme-option" data-theme-option="wasteland">5. 废土 (Pip-Boy)</button>
-              <button type="button" class="bs-bt-theme-option" data-theme-option="sakura">6. 樱花 (Modern)</button>
+              <button type="button" class="bs-bt-theme-option" data-theme-option="sakura">6. 樱花 (Clamshell)</button>
               <button type="button" class="bs-bt-theme-option" data-theme-option="holo">7. 全息 (Holo)</button>
               <button type="button" class="bs-bt-theme-option" data-theme-option="gothic">8. 哥特 (Gothic)</button>
               <button type="button" class="bs-bt-theme-option" data-theme-option="steampunk">9. 蒸汽 (Steam)</button>
               <button type="button" class="bs-bt-theme-option" data-theme-option="eldritch">10. 克系 (Eldritch)</button>
               <button type="button" class="bs-bt-theme-option" data-theme-option="ink">11. 水墨 (Ink)</button>
               <button type="button" class="bs-bt-theme-option" data-theme-option="constructivism">12. 建构 (Construct)</button>
+              <button type="button" class="bs-bt-theme-option" data-theme-option="iphone">13. 果机 (iPhone)</button>
+            </div>
+
+            <div id="bs-bt-iphone-panel" class="bs-bt-iphone-panel" hidden>
+              <hr class="sysHR" />
+              <div class="bs-bt-section-title">外观</div>
+              <div class="bs-bt-size-options">
+                <button type="button" class="bs-bt-size-option" data-iphone-base-option="light">浅色</button>
+                <button type="button" class="bs-bt-size-option" data-iphone-base-option="dark">深色</button>
+              </div>
+
+              <div class="bs-bt-section-title">强调色</div>
+              <div class="bs-bt-accent-row">
+                <button type="button" class="bs-bt-accent-swatch" data-iphone-accent-option="#0a84ff" style="--swatch:#0a84ff" title="蓝"></button>
+                <button type="button" class="bs-bt-accent-swatch" data-iphone-accent-option="#30d158" style="--swatch:#30d158" title="绿"></button>
+                <button type="button" class="bs-bt-accent-swatch" data-iphone-accent-option="#ff375f" style="--swatch:#ff375f" title="红"></button>
+                <button type="button" class="bs-bt-accent-swatch" data-iphone-accent-option="#ff9f0a" style="--swatch:#ff9f0a" title="橙"></button>
+                <button type="button" class="bs-bt-accent-swatch" data-iphone-accent-option="#bf5af2" style="--swatch:#bf5af2" title="紫"></button>
+                <button type="button" class="bs-bt-accent-swatch" data-iphone-accent-option="#64d2ff" style="--swatch:#64d2ff" title="青"></button>
+                <input type="color" id="bs-bt-iphone-accent" class="bs-bt-accent-picker" title="自订颜色" />
+              </div>
+
+              <div class="bs-bt-section-title">机身颜色</div>
+              <div class="bs-bt-accent-row">
+                <button type="button" class="bs-bt-accent-swatch" data-iphone-case-option="#c8c2b8" style="--swatch:#c8c2b8" title="原色钛"></button>
+                <button type="button" class="bs-bt-accent-swatch" data-iphone-case-option="#5a6a7d" style="--swatch:#5a6a7d" title="蓝色钛"></button>
+                <button type="button" class="bs-bt-accent-swatch" data-iphone-case-option="#e5e3df" style="--swatch:#e5e3df" title="白色钛"></button>
+                <button type="button" class="bs-bt-accent-swatch" data-iphone-case-option="#3a3a3c" style="--swatch:#3a3a3c" title="黑色钛"></button>
+                <button type="button" class="bs-bt-accent-swatch" data-iphone-case-option="#b8a894" style="--swatch:#b8a894" title="沙漠色钛"></button>
+                <button type="button" class="bs-bt-accent-swatch" data-iphone-case-option="#d6bd97" style="--swatch:#d6bd97" title="金"></button>
+                <input type="color" id="bs-bt-iphone-case" class="bs-bt-accent-picker" title="自订机身颜色" />
+              </div>
+
+              <div class="bs-bt-section-title">字体</div>
+              <select id="bs-bt-iphone-font" class="text_pole">
+                <option value="system">系统 (San Francisco / 苹方)</option>
+                <option value="rounded">圆体 (Rounded)</option>
+                <option value="serif">衬线 (思源宋)</option>
+                <option value="mono">等宽 (Mono)</option>
+                <option value="hand">手写 (霞鹜文楷)</option>
+              </select>
+              <small class="bs-bt-inline-status" style="display:block;margin-top:6px;opacity:0.75;">仅套用于「果机」主题；其余 12 套主题的配色与字体是该风格的一部分，不受此处影响。</small>
             </div>
           </div>
         </section>
@@ -145,6 +187,17 @@
             <div class="settings_section">
               <label for="bs-bt-api-url">OpenAI 兼容 API Base URL</label>
               <input id="bs-bt-api-url" class="text_pole" type="text" placeholder="https://api.example.com/v1" />
+              <small id="bs-bt-api-endpoint-preview" class="bs-bt-inline-status" style="display:block;margin-top:4px;opacity:0.85;">端点预览：<code id="bs-bt-api-endpoint-preview-code">—</code></small>
+            </div>
+
+            <div class="settings_section">
+              <label for="bs-bt-api-format">API 格式</label>
+              <select id="bs-bt-api-format" class="text_pole">
+                <option value="openai_compat">通用（兼容 OpenAI） /chat/completions</option>
+                <option value="openai_responses">自定义（兼容 OpenAI Responses） /responses</option>
+                <option value="claude_messages">自定义（兼容 Claude Messages） /messages</option>
+                <option value="gemini_interactions">自定义（兼容 Gemini Interactions） /interactions</option>
+              </select>
             </div>
 
             <div class="settings_section">
@@ -373,6 +426,83 @@
                 <label for="bs-bt-registry-pregnant-description">注册默认 pregnantDescription 规则</label>
                 <textarea id="bs-bt-registry-pregnant-description" class="text_pole bs-bt-textarea" rows="8"></textarea>
               </div>
+
+              <details class="settings_section bs-bt-special-fetus">
+                <summary>特殊胎儿来历（选填）</summary>
+                <small>只在这次注册确实会产生妊娠时才有意义。勾选后展开该项的设定。</small>
+                <div class="bs-bt-special-list">
+                  <div class="bs-bt-special-item">
+                    <label class="bs-bt-special-head">
+                      <input id="bs-bt-special-toggle-rebirth" type="checkbox" data-special-toggle="rebirth" />
+                      <span class="bs-bt-special-name">胎内回归</span>
+                      <span class="bs-bt-special-mode" data-mode="hard">直接写入</span>
+                    </label>
+                    <div class="bs-bt-special-body" data-special-body="rebirth" hidden>
+                      <small>一名已出生的角色回到子宫里成为其中一胎。产出后是全新个体。</small>
+                      <input id="bs-bt-special-rebirth" class="text_pole" type="text"
+                        placeholder="回到子宫里的那个人（可填 user 名）" />
+                    </div>
+                  </div>
+
+                  <div class="bs-bt-special-item">
+                    <label class="bs-bt-special-head">
+                      <input id="bs-bt-special-toggle-surrogacy" type="checkbox" data-special-toggle="surrogacy" />
+                      <span class="bs-bt-special-name">代孕／托卵</span>
+                      <span class="bs-bt-special-mode" data-mode="hard">直接写入</span>
+                    </label>
+                    <div class="bs-bt-special-body" data-special-body="surrogacy" hidden>
+                      <small>卵来自别人，承载者只提供子宫、不是遗传母亲。</small>
+                      <input id="bs-bt-special-surrogacy" class="text_pole" type="text"
+                        placeholder="提供卵的那个人" />
+                    </div>
+                  </div>
+
+                  <div class="bs-bt-special-item">
+                    <label class="bs-bt-special-head">
+                      <input id="bs-bt-special-chimera" type="checkbox" data-special-toggle="chimera" data-special-hint="chimera" />
+                      <span class="bs-bt-special-name">嵌合体</span>
+                      <span class="bs-bt-special-mode" data-mode="hint">交给模型</span>
+                    </label>
+                    <div class="bs-bt-special-body" data-special-body="chimera" hidden>
+                      <small>两颗以上的受精卵在著床前融合成一个个体，身上同时带有多套血统与性别来源。来源名字要由模型从角色卡里挑，程式补不出来。</small>
+                    </div>
+                  </div>
+
+                  <div class="bs-bt-special-item">
+                    <label class="bs-bt-special-head">
+                      <input id="bs-bt-special-identical" type="checkbox" data-special-toggle="identical" data-special-hint="identical" />
+                      <span class="bs-bt-special-name">同卵双胞胎</span>
+                      <span class="bs-bt-special-mode" data-mode="hint">交给模型</span>
+                    </label>
+                    <div class="bs-bt-special-body" data-special-body="identical" hidden>
+                      <small>一颗受精卵分裂成两胎，父系与种族完全一致。需要模型至少产出两颗胎儿。</small>
+                    </div>
+                  </div>
+
+                  <div class="bs-bt-special-item">
+                    <label class="bs-bt-special-head">
+                      <input id="bs-bt-special-superfetation" type="checkbox" data-special-toggle="superfetation" data-special-hint="superfetation" />
+                      <span class="bs-bt-special-name">异期复孕</span>
+                      <span class="bs-bt-special-mode" data-mode="hint">交给模型</span>
+                    </label>
+                    <div class="bs-bt-special-body" data-special-body="superfetation" hidden>
+                      <small>母体已经怀孕之后又受精一次，晚到那胎发育落后，最后一起娩出。受精时点由模型按孕龄决定。</small>
+                    </div>
+                  </div>
+
+                  <div class="bs-bt-special-item">
+                    <label class="bs-bt-special-head">
+                      <input id="bs-bt-special-nested" type="checkbox" data-special-toggle="nested" data-special-hint="nested" />
+                      <span class="bs-bt-special-name">孕中孕</span>
+                      <span class="bs-bt-special-mode" data-mode="hint">交给模型</span>
+                    </label>
+                    <div class="bs-bt-special-body" data-special-body="nested" hidden>
+                      <small>一颗胎儿长在另一颗胎儿体内，承载者会同时生下女儿与外孙。需要模型指定宿主是哪一胎。</small>
+                    </div>
+                  </div>
+                </div>
+                <small>「直接写入」由程式保证生效；「交给模型」得靠它编出胎儿结构，没照办时重跑一次注册即可。</small>
+              </details>
 
               <div class="settings_section bs-bt-action-row">
                 <button id="bs-bt-register-run" class="menu_button" type="button">注册当前角色</button>

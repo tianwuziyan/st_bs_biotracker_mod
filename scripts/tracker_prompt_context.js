@@ -2,7 +2,25 @@ import { PSY_MENS_FIELDS, PSY_PREG_FIELDS } from './registry_psy_config.js'
 import { buildEmbryoTypeLorePrompt } from './embryo_prompt_context.js'
 import { buildRaceCatalogBlock, buildRacePhysiologyPrompt } from './race_prompt_context.js'
 import { getDerivedTypeFluxProfile } from './race_config.js'
+import { deriveFetusTags, describeFetusTags } from './fetus_tags.js'
 import { LABOR_STAGES, PREGNANCY_STAGES } from './stage_config.js'
+
+/** 本轮 payload 里真的出现过的胎儿标签；没出现的标签不必浪费 token 去解释 */
+function collectRelevantFetusTags(payload = {}) {
+  const found = new Set();
+  const state = payload?.existing_state;
+  if (!state || typeof state !== 'object') return [];
+  for (const [name, item] of Object.entries(state)) {
+    const carrierName = item?.name || name;
+    const profile = item?.profile || {};
+    const fetuses = Array.isArray(profile?.pregnant?.fetuses) ? profile.pregnant.fetuses : [];
+    const children = Array.isArray(profile?.children) ? profile.children : [];
+    for (const record of [...fetuses, ...children]) {
+      for (const tag of deriveFetusTags(record, { carrierName })) found.add(tag);
+    }
+  }
+  return [...found];
+}
 function collectRelevantFluxNames(payload = {}) {
   const found = []
   const pushFluxName = derivedType => {
@@ -64,14 +82,17 @@ export const TRACKER_VARIABLE_GUIDE_PROMPT = [
   '',
   '[base]',
   '- isHere: 是否在场。false 时角色仍会随时间推进，但幕外角色只发送少量状态给你。',
-  '- stage: 当前阶段。可能是月经阶段、妊娠阶段、假孕期、产兆前驱、第一/第二/第三产程、产后恢复、无经期、未激活。',
+  '- stage: 当前阶段。可能是月经阶段、妊娠阶段、假孕期、回归期、产兆前驱、第一/第二/第三产程、产后恢复、无经期、未激活。',
+  '- 回归期：胎内回归的过渡阶段，由 bsWombReturn 产生。此期间衣着压力顶到上限、体内那一胎的胎重为上限 3.0，两者随 pregnant.wombReturn.remainingHours 归零而线性回落，之后自动转入孕早期。',
+  '- 回归期不受子宫压力影响，不会自然流产；此期间呼叫 bsAbortion 代表回归者被消化吸收、并入承载者，而不是被排出。',
+  '- pregnant.wombReturn: 回归期的进度，含 returner（回归者名）、totalHours、remainingHours。不在回归期时不出现。',
   '- days: 当前阶段已经过了多少天，使用 0 起算的 elapsed/progress 语义；进入新阶段时为 0，超过该阶段上限后才切换下一阶段。',
   '- fertilizationDays: 受精后、着床前已经过的天数；着床等待期以 6 天为基础，并随角色实际月经周期长度等比缩放。',
   '- latestSexDays: 距最近一次性行为经过的天数；超过一个周期后通常会失效。',
   '- age: 角色年龄，单位为年。',
   '- race: 当前保存的种族字符串，可能带子类或混血，不再带 [derived] 前缀。',
   '- derivedType: 衍生类型字符串，如 不死-僵尸；没有则为 null。',
-  '- sperms: 体内残留精液来源列表。',
+  '- sperms: 体内残留精液来源列表。残留每天自动衰减 10、归零即消失，通常 1-3 天内自然清空；不需要每轮重复描写流出。',
   '- sperms[*].male: 精液来源对象名称。',
   '- sperms[*].race: 该来源的父方种族字符串，已去除 [derived] 前缀；只描述当前残留精液。',
   '- sperms[*].derivedType: 该来源的父方衍生类型；没有则为 null。',
@@ -114,6 +135,11 @@ export const TRACKER_VARIABLE_GUIDE_PROMPT = [
   '- fetuses[*].provider: 胚胎真正的归属方（代孕委托者、虫母等），自然受孕为 null。单一 provider 的孩子分娩后自动转交；多母源嵌合体以 × 显示并留在孕母名下。要建立外源受精卵请用 bsImplantEmbryo，不要自行编造。',
   '- fetuses[*].providerSources: 可接收孩子的母源名单。多于一位时孩子默认登记在孕母名下，之后可手动转移给其中一位。',
   '- fetuses[*].chimera: 受精卵早期融合的嵌合资料，包含来源数量、父源、母源与融合前性别。没有融合时不出现。',
+  '- fetuses[*].tags: 系统标注的胎儿来历标签（如 chimera/surrogacy/identical），由系统推导或在事件发生当下写入，只读，不要自行增删。本轮出现过的标签会在下方另行说明。',
+  '- fetuses[*].identicalGroup: 同卵分裂的组别编号；带同一编号且 tags 含 identical 的胎儿由同一颗受精卵分裂而来。没有分裂时不出现。',
+  '- fetuses[*].nestedInEmbryoId: 孕中孕专用——这一胎套在体内哪一颗胎儿之中（指向该胎的内部编号）。它的母亲是那颗胎儿，父亲照常是精源；出生后两个孩子一起娩出，被套的那个的母亲就是同胎的另一个孩子。孕中孕藏得比一般异期胎更久，要到孕晚期才会出现在 fetuses 里。',
+  '- fetuses[*].conceivedAtDays: 异期复孕专用——这一胎受精当下的 effectivePregnantDays。该胎自己的孕龄 = effectivePregnantDays 减去这个值，所以同腹胎儿的发育进度可能不同。一般妊娠不出现。',
+  '- 异期复孕的胎儿在进入孕中期之前不会出现在 fetuses 里，也不计入 fetusesCount：角色本人还不知道自己怀了两胎。它在系统里照常发育、照常消耗供养力，所以在揭晓前你会看到供养负担与体感比胎数应有的更重——那是伏笔，可以据此写身体的异样，但不要直接写破「其实有两胎」。揭晓时系统会以 notify 告知。',
   '- fetuses[*].fatherRace: 父方种族字符串，已去除 [derived] 前缀，用于理解父源与 fatherDerivedType。',
   '- fetuses[*].fatherDerivedType: 父方衍生类型；若没有则为 null。',
   '- fetuses[*].gender: 胎儿性别。',
@@ -257,6 +283,11 @@ function buildTrackerMetabolismGuide(payload = null) {
   if (!breedingPsychologyEnabled) {
     baseGuide = baseGuide.replace('、psychology', '').replace(/\n?\[psychology\][\s\S]*?\n\[skills \/ talents\]/, '\n[skills / talents]')
   }
+  // 只解释本轮真的出现过的标签，与种族短叙述同规则：没用到就不占 token
+  const fetusTagLines = describeFetusTags(collectRelevantFetusTags(payload || {}));
+  if (fetusTagLines.length > 0) {
+    baseGuide += ['', '', '[本轮出现的胎儿标签]', ...fetusTagLines].join('\n');
+  }
   return fluxNames.length > 0
     ? baseGuide.replace(
         '- 若角色具有 derivedType，则 metabolism 一定包含 flux，并只保留该衍生类型未抵免的普通需求。flux 通常是 -150 到 150 的单一极性需求值；被 pregnant.expansion 命中的方向可扩至 -200 或 200。正值持续走向更正，负值持续走向更负，绝对值越高代表越需要使用 bsExcreteMetabolism 进行一次“解放”。解放会按释放量抵消当前需求，只有在抵消过头时才会跨过 0 翻转极性。',
@@ -381,6 +412,12 @@ export function buildMainFlowStatePrompt(payload = {}) {
   const hasState = Object.keys(existingState).length > 0
   if (!hasState) return ''
   const racePhysiologyPrompt = buildRacePhysiologyPrompt(payload || {})
+  // 特殊来历的胎儿只丢一串 tags 给主线模型，它无从判断该怎么写。
+  // 与种族短叙述同规则：只解释本轮真的出现过的标签，没出现就不占 token。
+  const fetusTagLines = describeFetusTags(collectRelevantFetusTags(payload || {}));
+  const fetusTagBlock = fetusTagLines.length > 0
+    ? ['', '[本轮出现的特殊胎儿来历]', ...fetusTagLines].join('\n')
+    : '';
   return [
     racePhysiologyPrompt,
     '<bs_biotracker>',
@@ -391,8 +428,9 @@ export function buildMainFlowStatePrompt(payload = {}) {
     '',
     '[当前已注册角色状态]',
     serializeStateForPrompt(existingState),
+    fetusTagBlock,
     '</bs_biotracker>',
-  ].join('\n')
+  ].filter((part) => part !== '').join('\n');
 }
 /**
  * 状态 JSON 注入防线：序列化后转义 `</` 与换行——角色卡/注册内容（描述、日记、

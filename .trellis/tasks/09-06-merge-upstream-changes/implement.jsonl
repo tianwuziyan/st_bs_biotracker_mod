@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "合并状态、提示词、工具和 UI 字段时使用跨层数据流与契约检查。"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "处理双方重叠实现和新增辅助模块时检查复用、重复逻辑及单一数据来源。"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "合并状态和工具层时遵循项目已有的妊娠速度冻结语义与后端质量约束。"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "合并主题、设置页和追踪 UI 时遵循前端质量检查边界。"}

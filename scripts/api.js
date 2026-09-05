@@ -1,5 +1,5 @@
-import { DEFAULT_SYSTEM_PROMPT } from './state.js'
-import { getHostChat, getHostChatCompletionSettings, getHostContext, getHostPreset, getHostPresetManager, getHostWorldInfoPrompt } from './host.js'
+import { API_FORMATS, DEFAULT_SYSTEM_PROMPT, getApiUrlForFormat, normalizeApiFormat } from './state.js'
+import { getHostChat, getHostChatCompletionSettings, getHostContext, getHostKind, getHostPreset, getHostPresetManager, getHostWorldInfoPrompt } from './host.js'
 const DEBUG_LAST_EFFECTIVE_REQUEST_KEY = '__bs_biotracker_debug_last_effective_request__'
 const DEBUG_LAST_API_RESPONSE_KEY = '__bs_biotracker_debug_last_api_response__'
 const INCLUDE_MAINFLOW_CHAT_MESSAGES = true
@@ -66,14 +66,55 @@ export function getApiBase(settings) {
   let apiBase = String(settings.apiUrl || '')
     .trim()
     .replace(/\/+$/, '')
-  apiBase = apiBase.replace(/\/(chat\/completions|models)$/i, '')
+  apiBase = apiBase.replace(/\/(chat\/completions|models|responses|messages|interactions)$/i, '')
   return apiBase.replace(/\/+$/, '')
 }
 export function getAuthHeaders(settings) {
   const headers = { 'Content-Type': 'application/json' }
-  if (settings.apiKey) headers.Authorization = `Bearer ${settings.apiKey}`
+  const key = settings.apiKey ? String(settings.apiKey) : ''
+  const format = normalizeApiFormat(settings?.apiFormat)
+  if (format === API_FORMATS.CLAUDE_MESSAGES) {
+    headers['anthropic-version'] = '2023-06-01'
+    if (key) {
+      headers.Authorization = `Bearer ${key}`
+      headers['x-api-key'] = key
+    }
+  } else if (format === API_FORMATS.GEMINI_INTERACTIONS) {
+    if (key) headers['x-goog-api-key'] = key
+  } else if (key) {
+    headers.Authorization = `Bearer ${key}`
+  }
   return headers
 }
+/**
+ * 宿主代理对非 OpenAI 兼容格式的支持：
+ * TauriTavern 后端读取 payload.custom_api_format，按 openai_responses.rs / claude
+ * builder 在服务端翻译 messages → /responses | /messages 上游请求；
+ * 原版 SillyTavern 后端不理解 custom_api_format，非 compat 格式改走 /proxy/ 透传
+ * 或浏览器直连（见 postBody 的传输选择）。
+ */
+function hostSupportsFormatAwareProxy() {
+  try {
+    return getHostKind() === 'tauritavern';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 把最近一次真实请求打到 UI（连接状态栏），TT 桌面端没有控制台也能看到端点与状态码。
+ */
+function traceRequestToUi(method, url, status, transport = '') {
+  if (typeof document === 'undefined') return;
+  try {
+    const node = document.getElementById('bs-bt-connect-status');
+    if (!node) return;
+    const suffix = status ? ` → HTTP ${status}` : '';
+    const via = transport ? `（${transport}）` : '';
+    node.textContent = `最近请求：${method} ${url}${suffix}${via}`;
+  } catch {}
+}
+
 function isBrowserRuntime() {
   return typeof window !== 'undefined' && typeof document !== 'undefined'
 }
@@ -101,14 +142,44 @@ function getHostProxyHeaders(extraHeaders = {}) {
   } catch {}
   return headers
 }
+/**
+ * 上游识别用 User-Agent（仅注入后端代理路径，见 buildHostProxyConfig）：
+ * 不带版本避免与 manifest.json 漂移，仓库 URL 供提供商核对来源。
+ */
+const PLUGIN_USER_AGENT = 'BS-BioTracker (+https://github.com/Liuuuu54/st_bs_biotracker)'
+
 function buildHostProxyConfig(apiBase, settings) {
   const apiKey = String(settings?.apiKey || '')
+  const format = normalizeApiFormat(settings?.apiFormat)
+  const headerLines = []
+  if (apiKey) {
+    if (format === API_FORMATS.GEMINI_INTERACTIONS) {
+      // Google AI 认 x-goog-api-key；Authorization: Bearer 会被当成 OAuth 而 401
+      headerLines.push(`x-goog-api-key: ${apiKey}`)
+    } else if (format === API_FORMATS.CLAUDE_MESSAGES) {
+      headerLines.push(
+        `Authorization: Bearer ${apiKey}`,
+        `x-api-key: ${apiKey}`,
+        'anthropic-version: 2023-06-01',
+      )
+    } else {
+      headerLines.push(`Authorization: Bearer ${apiKey}`)
+    }
+  }
+  // 原版 ST 后端用 node-fetch 发上游请求，默认 UA 是通用的 "node-fetch"；
+  // 部分提供商（如 OpenCode Go）拿 UA 做反欺诈信号，泛用 bot UA 可能被拦。
+  // custom_include_headers 会在 ST 后端合并进上游请求头（mergeObjectWithYaml），
+  // 足以覆盖默认值。TauriTavern 后端自带产品 UA（TauriTavern/<ver>）且
+  // additional headers 最后应用，注入这里会把产品 UA 顶掉，故 TT 跳过。
+  if (!hostSupportsFormatAwareProxy()) {
+    headerLines.push(`User-Agent: ${PLUGIN_USER_AGENT}`)
+  }
   return {
     chat_completion_source: 'custom',
     custom_url: apiBase,
     reverse_proxy: apiBase,
     proxy_password: apiKey,
-    custom_include_headers: apiKey ? `Authorization: Bearer ${apiKey}` : '',
+    custom_include_headers: headerLines.join('\n'),
   }
 }
 /**
@@ -318,7 +389,8 @@ async function requestHostProxyModelList(apiBase, settings) {
     timeoutMs: resolveModelListTimeoutMs(settings),
   })
 }
-async function requestHostProxyChatCompletion(apiBase, settings, requestBody, runContext = {}) {
+async function requestHostProxyChatCompletion(apiBase, settings, requestBody, runContext = {}, apiFormat = API_FORMATS.OPENAI_COMPAT) {
+  const formatAware = apiFormat && apiFormat !== API_FORMATS.OPENAI_COMPAT
   const proxyBody = {
     messages: requestBody.messages,
     model: requestBody.model,
@@ -329,7 +401,7 @@ async function requestHostProxyChatCompletion(apiBase, settings, requestBody, ru
     presence_penalty: requestBody.presence_penalty,
     max_tokens: requestBody.max_tokens,
     seed: requestBody.seed,
-    response_format: requestBody.response_format,
+    ...(formatAware ? { custom_api_format: apiFormat } : { response_format: requestBody.response_format }),
     stream: false,
     ...buildHostProxyConfig(apiBase, settings),
   }
@@ -706,11 +778,168 @@ function buildPresetSamplingBodyFromPreset(preset) {
   if (seed !== null && seed >= 0) body.seed = Math.floor(seed)
   return body
 }
+
+function buildResponsesInput(messages) {
+  return (Array.isArray(messages) ? messages : []).map(message => {
+    const role = String(message?.role || 'user').toLowerCase()
+    const content = String(message?.content ?? '')
+    if (role === 'system' || role === 'developer') return { role: 'developer', content }
+    if (role === 'assistant') return { role: 'assistant', content }
+    return { role: 'user', content }
+  })
+}
+
+function extractResponsesText(data) {
+  if (!data || typeof data !== 'object') return ''
+  if (typeof data.output_text === 'string' && data.output_text.trim()) return data.output_text
+  const output = Array.isArray(data.output) ? data.output : []
+  for (const item of output) {
+    if (!item || typeof item !== 'object') continue
+    if (item.type !== 'message' || item.role !== 'assistant') continue
+    const content = Array.isArray(item.content) ? item.content : []
+    for (const part of content) {
+      if (part?.type === 'output_text' && typeof part.text === 'string') return part.text
+      if (typeof part?.text === 'string') return part.text
+    }
+  }
+  if (typeof data?.choices?.[0]?.message?.content === 'string') return data.choices[0].message.content
+  return ''
+}
+
+function buildClaudeMessagesBody(body) {
+  const messages = Array.isArray(body.messages) ? body.messages : []
+  let system = ''
+  const claudeMessages = []
+  for (const message of messages) {
+    const role = String(message?.role || '').toLowerCase()
+    const content = String(message?.content ?? '')
+    if (role === 'system' || role === 'developer') {
+      system = system ? `${system}\n\n${content}` : content
+    } else if (role === 'assistant') {
+      claudeMessages.push({ role: 'assistant', content })
+    } else {
+      claudeMessages.push({ role: 'user', content })
+    }
+  }
+  const result = {
+    model: body.model,
+    max_tokens: body.max_tokens || body.max_completion_tokens || 4096,
+    messages: claudeMessages,
+  }
+  if (system) result.system = system
+  if (body.temperature !== undefined) result.temperature = body.temperature
+  if (body.top_p !== undefined) result.top_p = body.top_p
+  if (body.top_k !== undefined) result.top_k = body.top_k
+  return result
+}
+
+function extractClaudeText(data) {
+  if (!data || typeof data !== 'object') return ''
+  if (typeof data.content === 'string') return data.content
+  const content = Array.isArray(data.content) ? data.content : []
+  for (const part of content) {
+    if (part?.type === 'text' && typeof part.text === 'string') return part.text
+    if (typeof part?.text === 'string') return part.text
+  }
+  if (typeof data?.choices?.[0]?.message?.content === 'string') return data.choices[0].message.content
+  return ''
+}
+
+function buildGeminiInteractionsBody(body) {
+  const messages = Array.isArray(body.messages) ? body.messages : []
+  const systemParts = []
+  const steps = []
+  for (const message of messages) {
+    const role = String(message?.role || '').toLowerCase()
+    const text = String(message?.content ?? '')
+    if (role === 'system' || role === 'developer') {
+      if (text.trim()) systemParts.push(text.trim())
+    } else if (role === 'assistant') {
+      if (text.trim()) steps.push({ type: 'model_output', content: [{ type: 'text', text }] })
+    } else {
+      steps.push({ type: 'user_input', content: [{ type: 'text', text }] })
+    }
+  }
+  const result = {
+    model: body.model,
+    input: steps,
+    stream: false,
+    store: false,
+  }
+  if (systemParts.length) result.system_instruction = systemParts.join('\n\n')
+  const generationConfig = {}
+  if (Number.isFinite(body.temperature)) generationConfig.temperature = body.temperature
+  if (Number.isFinite(body.top_p)) generationConfig.top_p = body.top_p
+  if (Number.isFinite(body.top_k) && body.top_k > 0) generationConfig.top_k = Math.floor(body.top_k)
+  const maxTokens = Number.isFinite(body.max_tokens) ? body.max_tokens : body.max_completion_tokens
+  if (Number.isFinite(maxTokens) && maxTokens > 0) generationConfig.max_output_tokens = Math.floor(maxTokens)
+  if (Object.keys(generationConfig).length) result.generation_config = generationConfig
+  return result
+}
+
+function extractGeminiInteractionsText(data) {
+  if (!data || typeof data !== 'object') return ''
+  if (typeof data?.choices?.[0]?.message?.content === 'string') return data.choices[0].message.content
+  const status = String(data.status || '')
+  if (status === 'failed') throw new Error(`Gemini Interactions 回传失败：${String(data?.error?.message || 'unknown error')}`)
+  if (status && !['completed', 'requires_action', 'incomplete'].includes(status)) {
+    throw new Error(`Gemini Interactions 未正常完成（status: ${status}）`)
+  }
+  const steps = Array.isArray(data.steps) ? data.steps : []
+  let text = ''
+  for (const step of steps) {
+    if (step?.type !== 'model_output') continue
+    const content = Array.isArray(step.content) ? step.content : []
+    for (const block of content) {
+      if (block?.type === 'text' && typeof block.text === 'string') text += block.text
+    }
+  }
+  if (!text) throw new Error(`Gemini Interactions 回覆没有可消费的文本（status: ${status || 'unknown'}）`)
+  return text
+}
+
+function normalizeResponsesData(data) {
+  return { choices: [{ message: { content: extractResponsesText(data) } }] }
+}
+
+function normalizeClaudeData(data) {
+  return { choices: [{ message: { content: extractClaudeText(data) } }] }
+}
+
+function normalizeGeminiInteractionsData(data) {
+  return { choices: [{ message: { content: extractGeminiInteractionsText(data) } }] }
+}
+
+function buildDirectPayload(format, requestBody) {
+  if (format === API_FORMATS.OPENAI_RESPONSES) {
+    const payload = {
+      model: requestBody.model,
+      input: buildResponsesInput(requestBody.messages),
+      store: false,
+      temperature: requestBody.temperature,
+      top_p: requestBody.top_p,
+      seed: requestBody.seed,
+    }
+    if (requestBody.max_tokens) payload.max_output_tokens = requestBody.max_tokens
+    if (requestBody.max_completion_tokens) payload.max_output_tokens = requestBody.max_completion_tokens
+    if (requestBody.response_format?.type === 'json_object') payload.text = { format: { type: 'json_object' } }
+    return payload
+  }
+  if (format === API_FORMATS.CLAUDE_MESSAGES) return buildClaudeMessagesBody(requestBody)
+  if (format === API_FORMATS.GEMINI_INTERACTIONS) return buildGeminiInteractionsBody(requestBody)
+  return requestBody
+}
+
+function hasPresetToggleOverrides(settings) {
+  if (!shouldApplyAsyncPreset(settings)) return false
+  const presetName = resolvePresetName(settings)
+  if (!presetName) return false
+  const presetOverrides = settings?.trackerPromptToggleOverrides?.[presetName]
+  return !!presetOverrides && Object.keys(presetOverrides).length > 0
+}
+
 async function requestChatCompletion(apiBase, settings, body, runContext = {}) {
   const logApiDebug = (phase, details = {}) => {
-    // 默认关闭：完整 request/response 含聊天内容，同页任何脚本（其他扩展、角色卡的
-    // TH 脚本经 window.parent）都读得到。排查时在控制台执行：
-    //   globalThis.__bs_biotracker_debug_api__ = true
     if (!globalThis.__bs_biotracker_debug_api__) return
     try {
       const label = `[BS BioTracker][API debug] ${phase}`
@@ -720,53 +949,94 @@ async function requestChatCompletion(apiBase, settings, body, runContext = {}) {
       if (typeof console.groupEnd === 'function') console.groupEnd()
     } catch {}
   }
+
   const postBody = async (requestBody, attempt = 'primary') => {
     const previousAsyncFlag = globalThis.__bs_biotracker_async_request__
     globalThis.__bs_biotracker_async_request__ = true
-    const url = `${apiBase}/chat/completions`
-    // 代理路径同样把 key 交给 ST 后端转发，所以无条件校验，不只校验直连
+    const format = normalizeApiFormat(settings?.apiFormat)
+    const upstreamUrl = getApiUrlForFormat(apiBase, format)
+    const isCompat = format === API_FORMATS.OPENAI_COMPAT
+    const formatAwareProxy = !isCompat && hostSupportsFormatAwareProxy()
+    const transparentProxyUrl = !isCompat && !formatAwareProxy && isBrowserRuntime() && isCrossOriginUrl(upstreamUrl)
+      ? `/proxy/${upstreamUrl}`
+      : null
+    const canUseHostProxy = shouldUseHostProxy(upstreamUrl) && (isCompat || formatAwareProxy)
+    let transport = canUseHostProxy
+      ? (formatAwareProxy ? 'host-proxy-formatted' : 'host-proxy')
+      : (transparentProxyUrl ? 'host-proxy-transparent' : 'direct')
+    let url = canUseHostProxy ? '/api/backends/chat-completions/generate' : (transparentProxyUrl || upstreamUrl)
+    const directPayload = buildDirectPayload(format, requestBody)
+    const payloadForTransport = canUseHostProxy ? requestBody : directPayload
+    const directRequestText = JSON.stringify(directPayload)
     assertSafeDirectApiBase(apiBase)
-    const useHostProxy = shouldUseHostProxy(url)
-    let transport = useHostProxy ? 'host-proxy' : 'direct'
     let requestText = ''
     try {
-      requestText = JSON.stringify(requestBody)
+      requestText = JSON.stringify(payloadForTransport)
       logApiDebug(`request:${attempt}`, {
         transport,
-        url: useHostProxy ? '/api/backends/chat-completions/generate' : url,
+        url,
         apiBase,
-        requestBody,
+        format,
+        requestBody: payloadForTransport,
         requestText,
         requestTextLength: requestText.length,
       })
       let response
       let responseText
-      if (useHostProxy) {
+      if (canUseHostProxy) {
         let proxyError = null
         try {
-          ;({ response, responseText } = await requestHostProxyChatCompletion(apiBase, settings, requestBody, runContext))
+          ({ response, responseText } = await requestHostProxyChatCompletion(apiBase, settings, requestBody, runContext, format))
         } catch (error) {
           proxyError = error
           logApiDebug(`proxy_error:${attempt}`, { proxyError: error })
-          // 代理已经等满超时（或整轮时限已到），直连只会再卡一次同样的时长
           if (isApiTimeoutError(error) || isApiDeadlineError(error)) throw error
         }
         if (proxyError || (!response.ok && shouldFallbackFromHostProxy(responseText, response.status))) {
           transport = proxyError ? 'direct-after-proxy-error' : `direct-after-proxy-${response.status}`
+          url = upstreamUrl
           if (!proxyError && (response.status === 401 || response.status === 403)) {
             disableHostProxyForSession(response.status, responseText)
           }
-          ;({ response, responseText } = await fetchText(url, {
+          ({ response, responseText } = await fetchText(upstreamUrl, {
             method: 'POST',
             headers: getAuthHeaders(settings),
+            body: directRequestText,
+            timeoutMs: resolveApiTimeoutMs(settings),
+            externalSignal: runContext.signal || null,
+            deadlineMs: runContext.deadlineMs || 0,
+          }))
+        }
+      } else if (transparentProxyUrl) {
+        let proxyError = null
+        try {
+          ({ response, responseText } = await fetchText(transparentProxyUrl, {
+            method: 'POST',
+            headers: getHostProxyHeaders(getAuthHeaders(settings)),
             body: requestText,
+            timeoutMs: resolveApiTimeoutMs(settings),
+            externalSignal: runContext.signal || null,
+            deadlineMs: runContext.deadlineMs || 0,
+          }))
+        } catch (error) {
+          proxyError = error
+          logApiDebug(`transparent_proxy_error:${attempt}`, { proxyError: error })
+          if (isApiTimeoutError(error) || isApiDeadlineError(error)) throw error
+        }
+        if (proxyError || (!response.ok && shouldFallbackFromHostProxy(responseText, response.status))) {
+          transport = proxyError ? 'direct-after-proxy-error' : `direct-after-proxy-${response.status}`
+          url = upstreamUrl
+          ({ response, responseText } = await fetchText(upstreamUrl, {
+            method: 'POST',
+            headers: getAuthHeaders(settings),
+            body: directRequestText,
             timeoutMs: resolveApiTimeoutMs(settings),
             externalSignal: runContext.signal || null,
             deadlineMs: runContext.deadlineMs || 0,
           }))
         }
       } else {
-        ;({ response, responseText } = await fetchText(url, {
+        ({ response, responseText } = await fetchText(upstreamUrl, {
           method: 'POST',
           headers: getAuthHeaders(settings),
           body: requestText,
@@ -775,49 +1045,44 @@ async function requestChatCompletion(apiBase, settings, body, runContext = {}) {
           deadlineMs: runContext.deadlineMs || 0,
         }))
       }
-      // 调试快照同样默认关闭，避免无条件把完整请求/响应暂存在 globalThis
+      traceRequestToUi('POST', upstreamUrl, response.status, transport)
       if (globalThis.__bs_biotracker_debug_api__) {
         globalThis[DEBUG_LAST_API_RESPONSE_KEY] = {
           capturedAt: Date.now(),
           attempt,
           transport,
-          url: transport === 'host-proxy' ? '/api/backends/chat-completions/generate' : url,
+          format,
+          url,
           status: response.status,
           ok: response.ok,
           responseText,
           requestText,
         }
       }
-      logApiDebug(`response:${attempt}`, {
-        transport,
-        url: transport === 'host-proxy' ? '/api/backends/chat-completions/generate' : url,
-        status: response.status,
-        ok: response.ok,
-        responseText,
-        requestText,
-      })
-      return { response, responseText, requestText }
+      logApiDebug(`response:${attempt}`, { transport, url, status: response.status, ok: response.ok, responseText, requestText })
+      return { response, responseText, requestText, format }
     } catch (error) {
-      logApiDebug(`error:${attempt}`, {
-        transport,
-        url,
-        requestBody,
-        requestText,
-        error,
-      })
+      traceRequestToUi('POST', upstreamUrl, 0, transport)
+      logApiDebug(`error:${attempt}`, { transport, url, requestBody: payloadForTransport, requestText, error })
       if (isApiTimeoutError(error) || isApiDeadlineError(error)) throw error
       throw new Error(
-        `无法连接到 API。请检查 Base URL、API Key、服务是否启动；浏览器环境会优先通过酒馆后端代理。原始错误: ${String(error?.message || error)}`,
+        `无法连接到 API。请检查 Base URL、API Key、服务是否启动；浏览器环境会优先通过酒馆后端代理。若使用原版 SillyTavern 且渠道不允许浏览器直连（CORS 拦截），可在 config.yaml 设置 corsProxy.enabled: true 后重启，让酒馆服务器代为转发。原始错误: ${String(error?.message || error)}`,
       )
     } finally {
       globalThis.__bs_biotracker_async_request__ = previousAsyncFlag
     }
   }
+
   let result = await postBody(body, 'primary')
   let response = result.response
   let responseText = result.responseText
   let errorText = response.ok ? '' : responseText
-  if (!response.ok && response.status === 400 && body.response_format) {
+  const isResponses = result.format === API_FORMATS.OPENAI_RESPONSES
+  const isClaude = result.format === API_FORMATS.CLAUDE_MESSAGES
+  const isGemini = result.format === API_FORMATS.GEMINI_INTERACTIONS
+  const isNonCompatFormat = isResponses || isClaude || isGemini
+
+  if (!response.ok && response.status === 400 && body.response_format && !isNonCompatFormat) {
     const fallbackBody = {
       model: body.model,
       temperature: body.temperature,
@@ -833,38 +1098,30 @@ async function requestChatCompletion(apiBase, settings, body, runContext = {}) {
     responseText = result.responseText
     errorText = response.ok ? '' : responseText
   }
+
   const invalidArgument = response.status === 400 && /invalid argument|badRequest/i.test(errorText)
-  if (!response.ok && invalidArgument) {
-    const minimalBody = {
-      model: body.model,
-      messages: body.messages,
-    }
-    result = await postBody(minimalBody, 'minimal')
+  if (!response.ok && invalidArgument && !isNonCompatFormat) {
+    result = await postBody({ model: body.model, messages: body.messages }, 'minimal')
     response = result.response
     responseText = result.responseText
     errorText = response.ok ? '' : responseText
   }
+
   if (!response.ok) {
-    throw new Error(`API ${response.status}: ${sanitizeErrorText(errorText)}`)
+    throw new Error(`API ${response.status}［实际请求: ${getApiUrlForFormat(apiBase, result.format)}］: ${sanitizeErrorText(errorText)}`)
   }
   try {
-    return JSON.parse(responseText)
+    const parsed = JSON.parse(responseText)
+    if (isResponses) return normalizeResponsesData(parsed)
+    if (isClaude) return normalizeClaudeData(parsed)
+    if (isGemini) return normalizeGeminiInteractionsData(parsed)
+    return parsed
   } catch (error) {
-    logApiDebug('parse_error', {
-      status: response.status,
-      responseText,
-      error,
-    })
+    logApiDebug('parse_error', { status: response.status, responseText, error })
     throw error
   }
 }
-function hasPresetToggleOverrides(settings) {
-  if (!shouldApplyAsyncPreset(settings)) return false
-  const presetName = resolvePresetName(settings)
-  if (!presetName) return false
-  const presetOverrides = settings?.trackerPromptToggleOverrides?.[presetName]
-  return !!presetOverrides && Object.keys(presetOverrides).length > 0
-}
+
 export async function fetchModelList(settings) {
   const apiBase = getApiBase(settings)
   if (!apiBase) throw new Error('请先填写 API Base URL')

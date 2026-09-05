@@ -36,6 +36,7 @@ import {
   getSettings,
   getWorldbookEntryDisplayName,
   loadCharacterAdditionalWorldBooks,
+  createChildId,
   loadGlobalWorldBook,
   normalizeCharacterPsychologyState,
   recordChatStateSnapshot,
@@ -45,6 +46,7 @@ import {
   saveSettings,
   worldbookSelectionMatches,
 } from './state.js';
+import { sanitizeFetusTagList } from './fetus_tags.js';
 import { canLoadHostWorldInfo, getHostWorldBook, loadHostWorldInfo } from './host.js';
 import {
   normalizeNextSkillId,
@@ -793,7 +795,7 @@ export function buildRegistrySystemPrompt(settings, options = {}) {
     '- base.libido: 初始性欲。非妊娠上限100；妊娠後会随孕期提升，临产最后一天上限可达150。若角色开场就在发情、催情、强欲状态，可给较高值。',
     '- base.uterinePressure: 初始宫压。非妊娠上限50；妊娠後会随进度平滑提升，臨產期上限达150。【危险警告】孕早期与孕中期前期上限极低，超过15便极易触发流产警告！除非开局正在临盆或剧烈腹痛，否则强烈建议填 0。',
     '- base.latestSexDays: 距最近一次性行为经过的天数。若 experience.latestSexPartner 有意义，建议一并填写；若已超过最近一月经周期或无从判断，可为 null。',
-    '- base.sperms: 体内残留精液来源列表。适用于刚性交结束、仍有精液残留的开局；每项包含 male、race、value。race 可直接写 [衍生]种族，系统会自动拆出 derivedType。',
+    '- base.sperms: 体内残留精液来源列表。适用于刚性交结束、仍有精液残留的开局；每项包含 male、race、value，value 建议 10-30（每天自动衰减 10）。race 可直接写 [衍生]种族，系统会自动拆出 derivedType。',
     '- metabolism: 初始需求状态。普通种族上限皆為150，包含 excretion、hunger、sleep、milk、odor、companionship，分别表示泄意、饿意、困意、乳意、臭意、伴意；excretion（泄意）同时包含排尿与排便需求；milk 在普通周期表示乳房胀敏或周期不适，在妊娠、假孕或产后恢复阶段也可表示泌乳需求。',
     '- 若 base.derivedType 不为 null，则 metabolism 可填写 flux（范围 -150 到 150），并保留该衍生类型未抵免的普通需求。flux 是衍生种族专用的单一极性需求值：正值与负值分别代表两种相反的释放需求，绝对值越高需求越强。',
     '- pregnant.nutrition 是妊娠供养力盈余/赤字，专注参与胎儿体重/供养结算，不作为 metabolism 排解阻塞来源。',
@@ -850,6 +852,13 @@ export function buildRegistrySystemPrompt(settings, options = {}) {
     '- 不要填写 pregnant.effectivePregnantDays；系统会依据孕龄、角色种族妊娠速度与 bio.gestationModifierMultiplier 自动换算有效妊娠天数。',
     '- pregnant.fetusesCount: 这次怀孕的怀胎数',
     '- pregnant.fetuses: 每个胎儿包含 fathers、provider、race、gender、embryoType；也可填写 weight、tendencyAngle、affinity',
+    '- 胎儿可带 tags 标注特殊来历，只接受这几个：identical（同卵）、superfetation（异期复孕）、nested（孕中孕）、rebirth（胎内回归）。代孕不必标——给了 provider 就会自动识别。写不出对应支撑栏位的标签会被撤销，宁可不标也不要留一个指向虚空的关系。',
+    '- 嵌合体不必标 tags——给了 chimera 就会自动识别。chimera = { sourceCount: 融合前的受精卵数, fatherSources: [父方名字…], maternalSources: [遗传母方名字…], genderSources: [各来源的性别…] }；父方与母方名字加起来不足两个会被撤销，因为那不成其为嵌合。',
+    '- identical：同卵的几胎都标上即可，系统会自动把它们归为同一组；只标一胎会被撤销。',
+    '- superfetation：必须一并给 conceivedAtDays（这一胎受精时，母体已经怀了多少有效孕日），会被夹进这次妊娠的范围内。它比同腹其他胎儿晚受精、发育落后。',
+    '- nested：这一胎长在另一颗胎儿体内。除了 conceivedAtDays，还要给 nestedInIndex＝宿主在 fetuses 阵列里的下标（从 0 起算，不能指自己）。它的母亲是那颗胎儿，出生后承载者会同时生下女儿与外孙。',
+    '- rebirth：一名已出生的角色回到子宫里成为这一胎，fathers 写那个人的名字（可以是 user）。适合「开场就已经在角色子宫里」的设定。产出后是全新个体，与原来那个人不是同一笔资料。',
+    '- revealed：这一胎角色本人知不知道。省略时系统按孕龄自动判定（异期复孕进孕中期才知道、孕中孕要到孕晚期）；想让角色暂时不知情就明确给 false。',
     '- provider: 代孕母方、寄生等提供者名称，正常情况下为 null',
     '- weight: 胎儿体重/发育量倍率，范围 0.33-3.0；不确定可省略，系统会补 1.0',
     '- tendencyAngle: 胎位/趋向角度，范围 0-360；不确定可省略，系统会随机补值。角度映射必须固定为：0/360=正常头位/正位，180=完全臀位/倒位，90或270=横位；不要把 180 写成头位',
@@ -1035,6 +1044,21 @@ function pickObjectFields(value, allowedFields) {
   return result;
 }
 
+/**
+ * 嵌合体的三组来源阵列。空的来源等于没有嵌合——只留一个来源的嵌合体是自相矛盾的，
+ * 与其留半套资料让族谱画出残缺的边，不如整个撤掉。
+ */
+function sanitizeChimera(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const list = (input) => (Array.isArray(input) ? input.map((item) => String(item || '').trim()).filter(Boolean) : []);
+  const fatherSources = list(value.fatherSources);
+  const maternalSources = list(value.maternalSources);
+  const genderSources = list(value.genderSources);
+  if (fatherSources.length + maternalSources.length < 2) return undefined;
+  const sourceCount = Math.max(2, Math.floor(Number(value.sourceCount)) || Math.max(fatherSources.length, maternalSources.length, 2));
+  return { sourceCount, fatherSources, maternalSources, genderSources };
+}
+
 function sanitizeChildren(value) {
   if (!Array.isArray(value)) return [];
   return value
@@ -1060,9 +1084,12 @@ function sanitizeChildren(value) {
         gender: item.gender ?? null,
         race: parsed.race || null,
         derivedType: item.derivedType ?? parsed.derivedType ?? null,
+        fatherRace: item.fatherRace ?? null,
+        fatherDerivedType: item.fatherDerivedType ?? null,
         age: item.age ?? null,
         birthWeightRatio: Number.isFinite(Number(item.birthWeightRatio)) ? clampNumber(item.birthWeightRatio, 0.33, 3.0, 1.0) : null,
         birthAffinity: Number.isFinite(Number(item.birthAffinity)) ? clampNumber(item.birthAffinity, -50, 50, 0) : null,
+        id: item.id ?? createChildId(),
         registeredAs: item.registeredAs ?? null,
         talents: normalizeTalentList(item.talents ?? item.inheritedTalents),
       };
@@ -1107,10 +1134,19 @@ function sanitizePregnant(value) {
           fatherDerivedType: item.fatherDerivedType ?? parsed.derivedType ?? null,
           gender: item.gender ?? null,
           embryoType: item.embryoType ?? null,
+          // 嵌合体：多套来源无法从别处推导，模型不给就等于没有这回事
+          chimera: sanitizeChimera(item.chimera),
           maternalDerivedTypeProgress: Number.isFinite(Number(item.maternalDerivedTypeProgress)) ? clampNumber(item.maternalDerivedTypeProgress, -100, 100, 0) : undefined,
           weight: Number.isFinite(Number(item.weight)) ? clampNumber(item.weight, 0.33, 3.0, 1.0) : undefined,
           tendencyAngle: Number.isFinite(Number(item.tendencyAngle)) ? clampNumber(item.tendencyAngle, 0, 360, 0) : undefined,
           affinity: Number.isFinite(Number(item.affinity)) ? clampNumber(item.affinity, -50, 50, 0) : undefined,
+          // 特殊来历：让角色卡开场就能是同卵双胞胎、异期复孕、孕中孕或胎内回归。
+          // 只放行目录内的标签，支撑栏位在 normalizeRegisteredFetusTags 里对齐。
+          tags: sanitizeFetusTagList(item.tags),
+          conceivedAtDays: Number.isFinite(Number(item.conceivedAtDays)) ? Number(item.conceivedAtDays) : undefined,
+          identicalGroup: Number.isFinite(Number(item.identicalGroup)) ? Math.floor(Number(item.identicalGroup)) : undefined,
+          nestedInIndex: Number.isFinite(Number(item.nestedInIndex)) ? Math.floor(Number(item.nestedInIndex)) : undefined,
+          revealed: item.revealed === undefined ? undefined : Boolean(item.revealed),
           talents: normalizeTalentList(item.talents ?? item.inheritedTalents),
         };
       })
@@ -1174,6 +1210,144 @@ function deriveRegisteredFetusRace(motherRace, fatherRace) {
   return unique.join('x');
 }
 
+/**
+ * 玩家在注册页勾选的特殊胎儿来历。
+ *
+ * 分两条路走，因为这几种来历需要的资料量差很多：
+ * - 只需要一个名字的（胎内回归、代孕／托卵）走硬套：玩家填名字，程式直接写进结果，
+ *   不依赖模型愿不愿意照做。
+ * - 需要模型编出胎儿结构的（嵌合、同卵、异期复孕、孕中孕）走提示：勾了就往注册提示词里
+ *   加一段明确指示。玩家的勾选没办法凭空生出两个真实的血统来源，硬套只会造出假资料。
+ *
+ * 两条路最后都会流经 normalizeRegisteredFetusTags，所以不管走哪条都不会留下自相矛盾的状态。
+ */
+export const SPECIAL_FETUS_HINTS = {
+  chimera: '这次妊娠里要有一颗嵌合体胎儿：两颗以上的受精卵在著床前融合成一个个体。请给它 chimera = { sourceCount, fatherSources, maternalSources, genderSources }，来源名字要取自角色卡里真实存在的人，父方与母方名字合计至少两个。',
+  identical: '这次妊娠里要有一对同卵双胞胎：至少两颗胎儿都标上 tags: ["identical"]，两者的 fathers 与 race 必须一致。',
+  superfetation: '这次妊娠里要有一颗异期复孕的胎儿：它在母体已经怀孕之后才受精。给它 tags: ["superfetation"] 与 conceivedAtDays（受精当下母体已怀的有效孕日，必须小于目前孕龄），它比同腹其他胎儿发育落后。',
+  nested: '这次妊娠里要有一颗孕中孕的胎儿：它长在另一颗胎儿体内。给它 tags: ["nested"]、conceivedAtDays，以及 nestedInIndex＝宿主在 fetuses 阵列里的下标。宿主本身必须是一颗正常胎儿。',
+};
+
+/** 勾选转成追加给模型的指示；没勾任何一项时回传空字串 */
+export function buildSpecialFetusNotes(request) {
+  if (!request || typeof request !== 'object') return '';
+  const lines = [];
+  const rebirth = String(request.rebirth || '').trim();
+  if (rebirth) {
+    lines.push('这次妊娠里要有一颗胎内回归的胎儿：' + rebirth + ' 这个人已经回到子宫里成为其中一胎，请把这一胎的 fathers 写成「' + rebirth + '」并标上 tags: ["rebirth"]。');
+  }
+  const surrogacy = String(request.surrogacy || '').trim();
+  if (surrogacy) {
+    lines.push('这次妊娠是代孕／托卵：卵来自 ' + surrogacy + '，承载者只提供子宫、不是遗传母亲。请把这一胎的 provider 写成「' + surrogacy + '」。');
+  }
+  for (const key of Array.isArray(request.hints) ? request.hints : []) {
+    if (SPECIAL_FETUS_HINTS[key]) lines.push(SPECIAL_FETUS_HINTS[key]);
+  }
+  if (lines.length === 0) return '';
+  return ['【特殊胎儿来历】使用者已指定以下设定，请务必在 pregnant.fetuses 里实现：']
+    .concat(lines.map((line) => '- ' + line))
+    .join('\n');
+}
+
+/**
+ * 硬套只需要一个名字的两类来历。
+ *
+ * 只在模型真的产出了胎儿时才动手：没有妊娠却硬塞一胎，就得连孕龄、种族、胚胎型态一起编，
+ * 那已经不是「确保玩家的勾选生效」而是伪造资料了。产不出来时留给呼叫端提醒玩家。
+ */
+export function applyRequestedSpecialFetus(result, request) {
+  if (!request || typeof request !== 'object') return false;
+  const rebirth = String(request.rebirth || '').trim();
+  const surrogacy = String(request.surrogacy || '').trim();
+  if (!rebirth && !surrogacy) return false;
+  const fetuses = result?.profile?.pregnant?.fetuses;
+  if (!Array.isArray(fetuses)) return false;
+  const target = fetuses.find((item) => item && typeof item === 'object');
+  if (!target) return false;
+  if (rebirth) {
+    target.fathers = rebirth;
+    target.tags = sanitizeFetusTagList((Array.isArray(target.tags) ? target.tags : []).concat('rebirth'));
+  }
+  if (surrogacy) target.provider = surrogacy;
+  return true;
+}
+
+/**
+ * 把注册时给的特殊胎儿标签整理成自洽状态。
+ *
+ * 让模型直接写 tags 是有意的——「开场就已经在角色子宫里」这类设定没有别的表达方式。
+ * 代价是它可能写出自相矛盾的组合，所以这里逐项对齐：落单的同卵会被撤掉标签、
+ * 指不到宿主的孕中孕会被撤掉标签、异期复孕的受精点会被夹进合法范围。
+ * 宁可少一个标签，也不要留一个指向虚空的关系。
+ */
+function normalizeRegisteredFetusTags(pregnant) {
+  const fetuses = Array.isArray(pregnant.fetuses) ? pregnant.fetuses : [];
+  if (fetuses.length === 0) return;
+
+  fetuses.forEach((fetus, index) => {
+    if (!Number.isInteger(Number(fetus.embryoId)) || Number(fetus.embryoId) <= 0) fetus.embryoId = index + 1;
+    fetus.tags = sanitizeFetusTagList(fetus.tags);
+  });
+
+  // 孕中孕：模型给的是阵列索引（它写不出内部编号），换成宿主的 embryoId
+  for (const [index, fetus] of fetuses.entries()) {
+    const target = Number(fetus.nestedInIndex);
+    delete fetus.nestedInIndex;
+    const valid = Number.isInteger(target) && target >= 0 && target < fetuses.length && target !== index;
+    if (valid) fetus.nestedInEmbryoId = fetuses[target].embryoId;
+    if (!fetus.nestedInEmbryoId) fetus.tags = fetus.tags.filter((tag) => tag !== 'nested');
+  }
+  // 宿主自己也是被套的那颗时整条链不成立，一起撤掉
+  for (const fetus of fetuses) {
+    if (!fetus.nestedInEmbryoId) continue;
+    const host = fetuses.find((item) => item.embryoId === fetus.nestedInEmbryoId);
+    if (!host || host.nestedInEmbryoId) {
+      delete fetus.nestedInEmbryoId;
+      fetus.tags = fetus.tags.filter((tag) => tag !== 'nested');
+    }
+  }
+
+  // 同卵：标了却没给组别时自动分同一组；组内只有自己的撤掉标签
+  const lonely = fetuses.filter((fetus) => fetus.tags.includes('identical') && !fetus.identicalGroup);
+  if (lonely.length >= 2) for (const fetus of lonely) fetus.identicalGroup = lonely[0].embryoId;
+  for (const fetus of fetuses) {
+    const group = Number(fetus.identicalGroup);
+    const mates = group ? fetuses.filter((item) => Number(item.identicalGroup) === group) : [];
+    if (mates.length >= 2) {
+      if (!fetus.tags.includes('identical')) fetus.tags = sanitizeFetusTagList([...fetus.tags, 'identical']);
+    } else {
+      delete fetus.identicalGroup;
+      fetus.tags = fetus.tags.filter((tag) => tag !== 'identical');
+    }
+  }
+
+  // 异期复孕：受精点必须落在这次妊娠之内，且与标签互相对齐
+  const effectiveDays = Math.max(0, Number(pregnant.effectivePregnantDays) || 0);
+  for (const fetus of fetuses) {
+    const conceivedAt = Number(fetus.conceivedAtDays);
+    if (Number.isFinite(conceivedAt) && conceivedAt > 0) {
+      fetus.conceivedAtDays = Math.min(Math.max(conceivedAt, 0), Math.max(effectiveDays - 1, 0));
+      fetus.tags = sanitizeFetusTagList([...fetus.tags, 'superfetation']);
+    } else {
+      delete fetus.conceivedAtDays;
+      fetus.tags = fetus.tags.filter((tag) => tag !== 'superfetation' && tag !== 'nested');
+      delete fetus.nestedInEmbryoId;
+    }
+  }
+
+  // 模型没说藏不藏时，照运行期的规则判定：一般异期胎进孕中期揭晓，孕中孕要到孕晚期
+  for (const fetus of fetuses) {
+    if (!fetus.conceivedAtDays) { delete fetus.revealed; continue; }
+    if (fetus.revealed === undefined) {
+      const threshold = fetus.nestedInEmbryoId ? 189 : 84;
+      fetus.revealed = effectiveDays >= threshold;
+    }
+    if (!fetus.revealed) delete fetus.revealed;
+  }
+
+  for (const fetus of fetuses) if (fetus.tags.length === 0) delete fetus.tags;
+}
+
 function normalizeRegisteredPregnancy(profile) {
   const pregnant = profile.pregnant || {};
   const fetuses = Array.isArray(pregnant.fetuses) ? pregnant.fetuses.map((item) => ({ ...item })) : [];
@@ -1203,12 +1377,17 @@ function normalizeRegisteredPregnancy(profile) {
   const gestationSpeed = clampNumber(getGestationEffectiveSpeed(profile), 0.1, 20, 1.0);
   pregnant.effectivePregnantDays = Math.max(1, pregnant.pregnantDays * gestationSpeed);
   pregnant.amnionDurability = 100;
+  // 必须排在 effectivePregnantDays 算出来之后：受精点要夹进这次妊娠的范围，
+  // 揭晓与否也要拿它跟门槛比
+  normalizeRegisteredFetusTags(pregnant);
 
   const bio = profile.bio || {};
   const motherBreedTolerance = clampNumber(bio.breedTolerance, 0.1, 100, 1.0);
   pregnant.fetalEnergyDrain = pregnant.fetuses.reduce((sum, fetus) => {
     const weight = clampNumber(fetus?.weight, 0.33, 3.0, 1.0);
-    const ageInDays = pregnant.effectivePregnantDays * weight;
+    // 与运行期一致：异期胎用自己的孕龄，不按先来者的进度算负担
+    const ownAge = Math.max(0, pregnant.effectivePregnantDays - (Number(fetus?.conceivedAtDays) || 0));
+    const ageInDays = ownAge * weight;
     const fetalAgeWeeks = ageInDays / 7;
     const fetalLoad = fetalAgeWeeks / 40;
     return sum + (fetalLoad / motherBreedTolerance);
@@ -1727,7 +1906,10 @@ export async function runRegistry(ctx, options = {}) {
   const settings = getSettings(ctx);
   const chatState = getChatState(ctx, settings);
   const targetName = resolveRegistryTargetName(ctx, options.targetName);
-  const customNotes = String(options.customNotes !== undefined ? options.customNotes : (settings.registryCustomNotes || '')).trim();
+  // 玩家勾的特殊来历分两半：需要模型编出胎儿结构的走提示词，只需要名字的在结果回来后硬套
+  const specialFetus = options.specialFetus || null;
+  const baseNotes = String(options.customNotes !== undefined ? options.customNotes : (settings.registryCustomNotes || '')).trim();
+  const customNotes = [baseNotes, buildSpecialFetusNotes(specialFetus)].filter(Boolean).join('\n\n');
   if (!targetName) throw new Error('runRegistry 需要 targetName');
   const requestedSource = options.sourceChild || null;
   const sourceChildContext = requestedSource ? resolveRegistryChildSource(chatState, requestedSource) : null;
@@ -1801,6 +1983,7 @@ export async function runRegistry(ctx, options = {}) {
     // payload 里同时有角色卡与 target_character，模型常把角色卡名当成 name 回传，
     // 于是角色被注册成卡片名而不是输入的名字（重新注册一次又「好了」，其实只是这次没抽到）。
     result.name = targetName;
+    applyRequestedSpecialFetus(result, specialFetus);
     recordRegistryResultDebug(result);
     let character = applyRegistryResult(chatState, result, { allowBreedingPsychology: includeBreedingPsychology });
     if (sourceChildContext) character = applyRegistryChildInheritance(chatState, targetName, requestedSource).character;

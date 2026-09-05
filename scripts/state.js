@@ -64,6 +64,7 @@ export const THEME_CONFIG = {
   eldritch: {},
   ink: {},
   constructivism: {},
+  iphone: {},
 }
 export const DEFAULT_WARDROBE_PREP_PROMPT = [
   '请根据角色卡、世界书、最近对话、已注册状态与当前服装描述，为指定角色准备衣柜 JSON。',
@@ -111,16 +112,61 @@ export const DEFAULT_SYSTEM_PROMPT = [
   '母胎互动用 bsMaternalFetalInteraction；每名角色在每个新小时内仅允许一次成功的母胎互动变化，重复调用会被跳过。direction=fetal 时须传 change，表示胎儿对母体的亲近或排斥并改变 affinity，不补充营养。direction=maternal 时不传 change，表示母体安抚胎儿，系统随机判定 affinity 变化；若成功且有待安抚不适，小幅变化补回 1 点营养，大幅变化补回 2 点营养。若处于产兆前驱则表示分娩抵抗。',
   '不要编造怀孕天数、胎数、流产、分娩或其他高影响事件。',
 ].join('\n')
+
+export const API_FORMATS = Object.freeze({
+  OPENAI_COMPAT: 'openai_compat',
+  CLAUDE_MESSAGES: 'claude_messages',
+  OPENAI_RESPONSES: 'openai_responses',
+  GEMINI_INTERACTIONS: 'gemini_interactions',
+})
+
+export function normalizeApiFormat(value) {
+  const raw = String(value || '').trim().toLowerCase()
+  if (raw === API_FORMATS.OPENAI_RESPONSES || raw === 'responses' || raw === 'custom_openai_responses') return API_FORMATS.OPENAI_RESPONSES
+  if (raw === API_FORMATS.CLAUDE_MESSAGES || raw === 'claude' || raw === 'messages' || raw === 'custom_claude_messages' || raw === 'anthropic') return API_FORMATS.CLAUDE_MESSAGES
+  if (raw === API_FORMATS.GEMINI_INTERACTIONS || raw === 'gemini' || raw === 'interactions') return API_FORMATS.GEMINI_INTERACTIONS
+  return API_FORMATS.OPENAI_COMPAT
+}
+
+export function getApiEndpointSuffix(format) {
+  switch (normalizeApiFormat(format)) {
+    case API_FORMATS.OPENAI_RESPONSES:
+      return '/responses'
+    case API_FORMATS.CLAUDE_MESSAGES:
+      return '/messages'
+    case API_FORMATS.GEMINI_INTERACTIONS:
+      return '/interactions'
+    case API_FORMATS.OPENAI_COMPAT:
+    default:
+      return '/chat/completions'
+  }
+}
+
+export function getApiUrlForFormat(apiBase, format) {
+  const base = String(apiBase || '').trim().replace(/\/+$/, '')
+  const normalizedFormat = normalizeApiFormat(format)
+  if (normalizedFormat === API_FORMATS.GEMINI_INTERACTIONS && !/(?:^|\/)v1(?:beta)?$/i.test(base)) {
+    return `${base}/v1beta/interactions`
+  }
+  return `${base}${getApiEndpointSuffix(normalizedFormat)}`
+}
+
 export const DEFAULT_SETTINGS = Object.freeze({
   theme: 'retro',
   deviceSize: 'phone',
   fontSize: 'standard',
+  // 只有 iphone 主题会读这三项：其余 12 套是固定美术风格，配色是主题本身的一部分
+  iphoneBase: 'light',
+  iphoneAccent: '#0a84ff',
+  iphoneCase: '#c8c2b8',
+  iphoneFont: 'system',
   enabled: false,
   useStPresetForAsync: false,
   trackerPresetName: '',
   trackerPromptToggles: {},
   trackerPromptToggleOverrides: {},
   apiUrl: '',
+  apiFormat: API_FORMATS.OPENAI_COMPAT,
   apiKey: '',
   model: 'gpt-4.1-mini',
   modelOptions: [],
@@ -181,24 +227,10 @@ function clampLevel(value, fallback = 4) {
   if (!Number.isFinite(next)) return fallback
   return Math.max(1, Math.min(7, Math.round(next)))
 }
-function sanitizeInteger(value, { min = -999999, max = 999999 } = {}) {
-  const next = Number(value)
-  if (!Number.isFinite(next)) return null
-  return Math.max(min, Math.min(max, Math.round(next)))
-}
 function sanitizeNumber(value, { min = -999999, max = 999999 } = {}) {
   const next = Number(value)
   if (!Number.isFinite(next)) return null
   return Math.max(min, Math.min(max, next))
-}
-function sanitizeString(value) {
-  if (value === null) return null
-  if (value === undefined) return undefined
-  return String(value)
-}
-function sanitizeStringList(value) {
-  if (!Array.isArray(value)) return null
-  return value.map(item => String(item ?? '')).filter(Boolean)
 }
 function pickFirstString(obj, paths) {
   for (const path of paths) {
@@ -403,27 +435,6 @@ export function normalizeCharacterPsychologyState(characterState) {
   }
   return characterState
 }
-function sanitizeObjectPatch(value, allowedFields, sanitizerMap = {}) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
-  const result = {}
-  for (const field of allowedFields) {
-    if (value[field] === undefined) continue
-    const sanitizer = sanitizerMap[field]
-    const next = sanitizer ? sanitizer(value[field]) : value[field]
-    if (next !== undefined) result[field] = next
-  }
-  return Object.keys(result).length > 0 ? result : null
-}
-function sanitizePregnancyBlockage(value) {
-  if (value === null) return null
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
-  const key = String(value.key || '').trim()
-  if (!key) return null
-  return {
-    key,
-    severity: sanitizeNumber(value.severity, { min: 0, max: 0.9 }) ?? 0,
-  }
-}
 export function getVitalityInitByLevel(level) {
   return VITALITY_CAPS[clampLevel(level)] || VITALITY_CAPS[4]
 }
@@ -552,7 +563,10 @@ export function syncCharacterStageFromProfile(characterState) {
     currentStage === '产后恢复' ||
     LABOR_STAGES.includes(currentStage) ||
     currentStage === '无经期' ||
-    currentStage === '未激活'
+    currentStage === '未激活' ||
+    // 胎内回归的过渡阶段：不列进来会掉到下面的 deriveMenstrualStageState，
+    // 被重设成月经阶段，回归状态就此消失
+    currentStage === '回归期'
   ) {
     next.profile.base = {
       ...base,
@@ -615,333 +629,13 @@ function areSnapshotArraysEqual(left, right) {
   }
   return true
 }
-function sanitizeSpermList(value) {
-  if (!Array.isArray(value)) return null
-  const result = value
-    .filter(item => item && typeof item === 'object')
-    .map(item => {
-      const next = {
-        male: sanitizeString(item.male) ?? null,
-        race: sanitizeString(item.race) ?? null,
-        derivedType: sanitizeString(item.derivedType) ?? null,
-        value: sanitizeInteger(item.value, { min: 0, max: 9999 }) ?? 0,
-      }
-      return next
-    })
-  return result
-}
-function sanitizeConceptionCandidateList(value) {
-  if (!Array.isArray(value)) return null
-  const seen = new Set()
-  const result = []
-  for (const item of value) {
-    if (!item || typeof item !== 'object') continue
-    const male = sanitizeString(item.male)
-    const race = sanitizeString(item.race)
-    const derivedType = sanitizeString(item.derivedType)
-    const competitionWeight = sanitizeNumber(item.competitionWeight, { min: 0, max: 9999 })
-    if (!male || !race || competitionWeight === null || competitionWeight <= 0 || seen.has(male)) continue
-    seen.add(male)
-    result.push({ male, race, derivedType: derivedType ?? null, competitionWeight })
-  }
-  return result
-}
-function sanitizeFetusList(value) {
-  if (!Array.isArray(value)) return null
-  return value
-    .filter(item => item && typeof item === 'object')
-    .map(item => {
-      const fetus = {}
-      const stringFields = ['fathers', 'provider', 'race', 'fatherRace', 'gender', 'embryoType', 'fatherDerivedType']
-      for (const field of stringFields) {
-        const next = sanitizeString(item[field])
-        if (next !== undefined) fetus[field] = next
-      }
-      const embryoId = sanitizeInteger(item.embryoId, { min: 1, max: 999999 })
-      if (embryoId !== null) fetus.embryoId = embryoId
-      fetus.fusionCheckedWith = Array.isArray(item.fusionCheckedWith)
-        ? [...new Set(item.fusionCheckedWith.map(value => sanitizeInteger(value, { min: 1, max: 999999 })).filter(value => value !== null))]
-        : []
-      fetus.providerSources = Array.isArray(item.providerSources) ? [...new Set(item.providerSources.map(sanitizeString).filter(Boolean))] : []
-      if (item.chimera && typeof item.chimera === 'object' && !Array.isArray(item.chimera)) {
-        fetus.chimera = {
-          sourceCount: sanitizeInteger(item.chimera.sourceCount, { min: 2, max: 50 }) ?? 2,
-          fatherSources: Array.isArray(item.chimera.fatherSources)
-            ? [...new Set(item.chimera.fatherSources.map(sanitizeString).filter(Boolean))]
-            : [],
-          maternalSources: Array.isArray(item.chimera.maternalSources)
-            ? [...new Set(item.chimera.maternalSources.map(sanitizeString).filter(Boolean))]
-            : [],
-          genderSources: Array.isArray(item.chimera.genderSources) ? item.chimera.genderSources.map(sanitizeString).filter(Boolean) : [],
-        }
-      }
-      const numberFields = {
-        weight: { min: 0.33, max: 3.0 },
-        tendencyAngle: { min: 0, max: 360 },
-        affinity: { min: -50, max: 50 },
-        maternalDerivedTypeProgress: { min: -100, max: 100 },
-      }
-      for (const [field, rule] of Object.entries(numberFields)) {
-        if (item[field] === undefined) continue
-        const next = sanitizeNumber(item[field], rule)
-        if (next !== null) fetus[field] = next
-      }
-      fetus.talents = normalizeTalentList(item.talents ?? item.inheritedTalents)
-      return fetus
-    })
-}
-function sanitizeChildrenList(value) {
-  if (!Array.isArray(value)) return null
-  return value
-    .filter(item => item && typeof item === 'object')
-    .map(item => ({
-      name: sanitizeString(item.name) ?? null,
-      fathers: sanitizeString(item.fathers) ?? null,
-      // 代孕／寄生的归属标记；沿用 fetus 的同名语义
-      provider: sanitizeString(item.provider) ?? null,
-      providerSources: Array.isArray(item.providerSources) ? [...new Set(item.providerSources.map(sanitizeString).filter(Boolean))] : [],
-      chimera:
-        item.chimera && typeof item.chimera === 'object' && !Array.isArray(item.chimera)
-          ? {
-              sourceCount: sanitizeInteger(item.chimera.sourceCount, { min: 2, max: 50 }) ?? 2,
-              fatherSources: Array.isArray(item.chimera.fatherSources)
-                ? [...new Set(item.chimera.fatherSources.map(sanitizeString).filter(Boolean))]
-                : [],
-              maternalSources: Array.isArray(item.chimera.maternalSources)
-                ? [...new Set(item.chimera.maternalSources.map(sanitizeString).filter(Boolean))]
-                : [],
-              genderSources: Array.isArray(item.chimera.genderSources) ? item.chimera.genderSources.map(sanitizeString).filter(Boolean) : [],
-            }
-          : null,
-      gender: sanitizeString(item.gender) ?? null,
-      race: sanitizeString(item.race) ?? null,
-      derivedType: sanitizeString(item.derivedType) ?? null,
-      age: sanitizeNumber(item.age, { min: 0, max: 9999 }) ?? null,
-      birthWeightRatio: sanitizeNumber(item.birthWeightRatio, { min: 0.33, max: 3.0 }) ?? null,
-      birthAffinity: sanitizeNumber(item.birthAffinity, { min: -50, max: 50 }) ?? null,
-      registeredAs: sanitizeString(item.registeredAs) ?? null,
-      talents: normalizeTalentList(item.talents ?? item.inheritedTalents),
-    }))
-}
-function sanitizeProfilePatch(profilePatch) {
-  if (!profilePatch || typeof profilePatch !== 'object' || Array.isArray(profilePatch)) return null
-  const cooldown = sanitizeObjectPatch(
-    profilePatch.cooldown,
-    [
-      'orgasmOvulationUsed',
-      'naturalOvulationUsed',
-      'naturalConceptionResolved',
-      'pregnancyPressureWarning',
-      'psychologyUpdateUsed',
-      'maternalFetalInteractionUsed',
-    ],
-    {
-      orgasmOvulationUsed: value => Boolean(value),
-      naturalOvulationUsed: value => Boolean(value),
-      naturalConceptionResolved: value => Boolean(value),
-      pregnancyPressureWarning: value => Boolean(value),
-      psychologyUpdateUsed: value => Boolean(value),
-      maternalFetalInteractionUsed: value => Boolean(value),
-    },
-  )
-  const base = sanitizeObjectPatch(
-    profilePatch.base,
-    [
-      'isHere',
-      'days',
-      'fertilizationDays',
-      'latestSexDays',
-      'age',
-      'stage',
-      'race',
-      'derivedType',
-      'sperms',
-      'conceptionCandidates',
-      'eggs',
-      'libido',
-      'uterinePressure',
-      'vitality',
-      'psyStress',
-      'vitalityLevel',
-      'psyStressLevel',
-    ],
-    {
-      isHere: value => Boolean(value),
-      days: value => sanitizeNumber(value, { min: 0, max: 9999 }),
-      fertilizationDays: value => sanitizeNumber(value, { min: 0, max: 9999 }),
-      latestSexDays: value => sanitizeInteger(value, { min: -1, max: 9999 }),
-      age: value => sanitizeNumber(value, { min: 0, max: 9999 }),
-      stage: sanitizeString,
-      race: sanitizeString,
-      derivedType: sanitizeString,
-      sperms: sanitizeSpermList,
-      conceptionCandidates: sanitizeConceptionCandidateList,
-      eggs: value => sanitizeInteger(value, { min: 0, max: 999 }),
-      libido: value => sanitizeInteger(value, { min: 0, max: 150 }),
-      uterinePressure: value => sanitizeInteger(value, { min: 0, max: 150 }),
-      vitality: value => sanitizeInteger(value, { min: 0, max: 200 }),
-      psyStress: value => sanitizeInteger(value, { min: 0, max: 200 }),
-      vitalityLevel: value => clampLevel(value),
-      psyStressLevel: value => clampLevel(value),
-    },
-  )
-  const pregnant = sanitizeObjectPatch(
-    profilePatch.pregnant,
-    [
-      'pregnantDays',
-      'effectivePregnantDays',
-      'laborHours',
-      'effectiveLaborHours',
-      'laborPhase',
-      'laborFetusIndex',
-      'laborPain',
-      'prodromalOriginStage',
-      'prodromalRemainingHours',
-      'prodromalDelayProgressHours',
-      'fetusesCount',
-      'fetalEnergyDrain',
-      'nutrition',
-      'symptomReliefPending',
-      'blockage',
-      'acceleration',
-      'expansion',
-      'fetuses',
-    ],
-    {
-      pregnantDays: value => sanitizeNumber(value, { min: 0, max: 9999 }),
-      effectivePregnantDays: value => sanitizeNumber(value, { min: 0, max: 9999 }),
-      laborHours: value => sanitizeNumber(value, { min: 0, max: 9999 }),
-      effectiveLaborHours: value => sanitizeNumber(value, { min: 0, max: 9999 }),
-      laborPhase: sanitizeString,
-      laborFetusIndex: value => sanitizeInteger(value, { min: 0, max: 99 }),
-      laborPain: value => sanitizeNumber(value, { min: 0, max: 10 }),
-      prodromalOriginStage: sanitizeString,
-      prodromalRemainingHours: value => sanitizeNumber(value, { min: 0, max: 9999 }),
-      prodromalDelayProgressHours: value => sanitizeNumber(value, { min: 0, max: 9999 }),
-      fetusesCount: value => sanitizeInteger(value, { min: 0, max: 99 }),
-      fetalEnergyDrain: value => sanitizeNumber(value, { min: 0, max: 9999 }),
-      nutrition: value => sanitizeNumber(value, { min: -999, max: 999 }),
-      symptomReliefPending: value => sanitizeInteger(value, { min: 0, max: 999 }),
-      blockage: sanitizePregnancyBlockage,
-      acceleration: sanitizePregnancyBlockage,
-      expansion: sanitizePregnancyBlockage,
-      fetuses: sanitizeFetusList,
-    },
-  )
-  const experience = sanitizeObjectPatch(
-    profilePatch.experience,
-    [
-      'virginity',
-      'latestSexPartner',
-      'emotionalMate',
-      'marriageMate',
-      'pregnantExperience',
-      'naturalBirthExperience',
-      'surgicalBirthExperience',
-      'miscarriageExperience',
-    ],
-    {
-      virginity: sanitizeString,
-      latestSexPartner: sanitizeString,
-      emotionalMate: sanitizeString,
-      marriageMate: sanitizeString,
-      pregnantExperience: value => sanitizeInteger(value, { min: 0, max: 999 }),
-      naturalBirthExperience: value => sanitizeInteger(value, { min: 0, max: 999 }),
-      surgicalBirthExperience: value => sanitizeInteger(value, { min: 0, max: 999 }),
-      miscarriageExperience: value => sanitizeInteger(value, { min: 0, max: 999 }),
-    },
-  )
-  const children = sanitizeChildrenList(profilePatch.children)
-  const skills = normalizeSkillList(profilePatch.skills)
-  const talents = normalizeTalentList(profilePatch.talents)
-  const skillHistory = normalizeSkillHistory(profilePatch.skillHistory)
-  const bio = sanitizeObjectPatch(
-    profilePatch.bio,
-    [
-      'menstrualLengthRatio',
-      'gestationSpeciesSpeed',
-      'gestationEffectiveSpeed',
-      'gestationModifierMultiplier',
-      'gestationModifierName',
-      'gestationModifierDescription',
-      'birthDifficulty',
-      'breedTolerance',
-      'impregnationDifficulty',
-      'orgasmOvulationAmount',
-      'identicalProbability',
-      'recoveryDays',
-    ],
-    {
-      menstrualLengthRatio: value => sanitizeNumber(value, { min: 0.1, max: 20 }),
-      gestationSpeciesSpeed: value => sanitizeNumber(value, { min: 0.1, max: 20 }),
-      gestationEffectiveSpeed: value => sanitizeNumber(value, { min: 0.1, max: 20 }),
-      gestationModifierMultiplier: value => sanitizeNumber(value, { min: 0, max: 20 }),
-      gestationModifierName: sanitizeString,
-      gestationModifierDescription: sanitizeString,
-      birthDifficulty: value => sanitizeNumber(value, { min: 0, max: 100 }),
-      breedTolerance: value => sanitizeNumber(value, { min: 0, max: 100 }),
-      impregnationDifficulty: value => sanitizeNumber(value, { min: 0, max: 100 }),
-      orgasmOvulationAmount: value => sanitizeInteger(value, { min: 0, max: 100 }),
-      identicalProbability: value => sanitizeNumber(value, { min: 0, max: 100 }),
-      recoveryDays: value => sanitizeInteger(value, { min: 0, max: 9999 }),
-    },
-  )
-  const mens = normalizePsychologyGroup(profilePatch.psychology?.mens, PSY_MENS_FIELDS, {
-    includeDefaults: false,
-    booleanFields: PSY_MENS_BOOL_FIELDS,
-  })
-  const pregPsy = normalizePsychologyGroup(profilePatch.psychology?.preg, PSY_PREG_FIELDS, {
-    includeDefaults: false,
-    booleanFields: PSY_PREG_BOOL_FIELDS,
-  })
-  const metabolism = sanitizeObjectPatch(profilePatch.metabolism, ['excretion', 'hunger', 'sleep', 'flux', 'milk', 'odor', 'companionship'], {
-    excretion: value => sanitizeInteger(value, { min: 0, max: 200 }),
-    hunger: value => sanitizeInteger(value, { min: 0, max: 200 }),
-    sleep: value => sanitizeInteger(value, { min: 0, max: 200 }),
-    flux: value => sanitizeInteger(value, { min: -200, max: 200 }),
-    milk: value => sanitizeInteger(value, { min: 0, max: 200 }),
-    odor: value => sanitizeInteger(value, { min: 0, max: 200 }),
-    companionship: value => sanitizeInteger(value, { min: 0, max: 200 }),
-  })
-  const descriptions = sanitizeObjectPatch(profilePatch.descriptions, ['normalDescription', 'pregnantDescription'], {
-    normalDescription: sanitizeString,
-    pregnantDescription: sanitizeString,
-  })
-  const notify = sanitizeObjectPatch(profilePatch.notify, ['firstly', 'secondly', 'thirdly'], {
-    firstly: sanitizeString,
-    secondly: sanitizeString,
-    thirdly: sanitizeString,
-  })
-  const immune = sanitizeObjectPatch(profilePatch.immune, ['metabolism', 'miscarriage', 'realisticLabor'], {
-    metabolism: value => Boolean(value),
-    miscarriage: value => Boolean(value),
-    realisticLabor: value => Boolean(value),
-  })
-  const result = {}
-  if (cooldown) result.cooldown = cooldown
-  if (base) result.base = base
-  if (pregnant) {
-    if (pregnant.fetuses && pregnant.fetusesCount === undefined) pregnant.fetusesCount = pregnant.fetuses.length
-    result.pregnant = pregnant
-  }
-  if (experience) result.experience = experience
-  if (children) result.children = children
-  if (profilePatch.skills !== undefined) result.skills = skills
-  if (profilePatch.talents !== undefined) result.talents = talents
-  if (profilePatch.skillHistory !== undefined) result.skillHistory = skillHistory
-  if (bio) result.bio = bio
-  if (mens || pregPsy) result.psychology = {}
-  if (mens) result.psychology.mens = mens
-  if (pregPsy) result.psychology.preg = pregPsy
-  if (metabolism) result.metabolism = metabolism
-  if (profilePatch.wardrobe) result.wardrobe = normalizeWardrobeState(profilePatch.wardrobe)
-  if (profilePatch.outfit && (result.wardrobe?.enabled || profilePatch.wardrobe?.enabled)) {
-    result.outfit = normalizeOutfitState(profilePatch.outfit, result.wardrobe || profilePatch.wardrobe)
-  }
-  if (descriptions) result.descriptions = descriptions
-  if (notify) result.notify = notify
-  if (immune) result.immune = immune
-  return Object.keys(result).length > 0 ? result : null
+/**
+ * 孩子记录的稳定标识。此前只能用「母亲名 + children 阵列索引」引用，
+ * 改名或搬移孩子都会让引用失联（搬移时得手动修正索引）。
+ * 有了 id，血缘关系图与注册来源都能靠它连线。
+ */
+export function createChildId() {
+  return `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 export function createEmptyChatState() {
   return {
@@ -1203,6 +897,11 @@ export function getSettings(ctx) {
     if (JSON.stringify(mergedGuides) !== JSON.stringify(settings.registryDescriptionGuides)) shouldSave = true
     settings.registryDescriptionGuides = mergedGuides
   }
+  const normalizedApiFormat = normalizeApiFormat(settings.apiFormat)
+  if (settings.apiFormat !== normalizedApiFormat) {
+    settings.apiFormat = normalizedApiFormat
+    shouldSave = true
+  }
   if (shouldSave) saveHostSettings(ctx)
   return settings
 }
@@ -1247,6 +946,17 @@ export function getChatState(ctx, settings) {
     }
     chatState.characters = migrated
     shouldSave = true
+  }
+  // 存量迁移：早期的孩子记录没有 id，补上后血缘引用才不依赖阵列索引
+  for (const character of Object.values(chatState.characters)) {
+    const children = character?.profile?.children
+    if (!Array.isArray(children)) continue
+    for (const child of children) {
+      if (child && typeof child === 'object' && !child.id) {
+        child.id = createChildId()
+        shouldSave = true
+      }
+    }
   }
   const normalizedSkillCatalog = normalizeSkillCatalog(chatState.skillCatalog)
   if (JSON.stringify(chatState.skillCatalog || []) !== JSON.stringify(normalizedSkillCatalog)) shouldSave = true

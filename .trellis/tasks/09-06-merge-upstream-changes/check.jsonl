@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "验证状态字段、提示词 payload、族谱投影和 UI 消费之间的跨层一致性。"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "验证合并后没有重复契约解析、遗漏调用方或被覆盖的本地入口。"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "检查后端状态/工具逻辑、冻结语义和测试质量。"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "检查前端模板、主题样式、交互绑定和 UI 测试覆盖。"}

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test, { afterEach } from 'node:test';
 
 import { buildPayloadWithMainflowCopy, callOpenAICompatible, fetchModelList, isApiDeadlineError, isApiTimeoutError, resolveApiTimeoutMs, resolveOverallDeadlineMs } from '../scripts/api.js';
+import { API_FORMATS, getApiUrlForFormat, normalizeApiFormat } from '../scripts/state.js';
 
 const ORIGINAL_GLOBALS = {
   fetch: globalThis.fetch,
@@ -88,6 +89,11 @@ test('fetchModelList uses the SillyTavern backend proxy for a cross-origin API',
   assert.equal(body.custom_url, 'https://example-model-host.test/v1');
   assert.equal(body.reverse_proxy, 'https://example-model-host.test/v1');
   assert.equal(body.proxy_password, '');
+  // 无密钥时 ST 后端代理仍应带自定义 UA（node-fetch 默认 UA 的覆盖与密钥无关）
+  assert.equal(
+    body.custom_include_headers,
+    'User-Agent: BS-BioTracker (+https://github.com/Liuuuu54/st_bs_biotracker)',
+  );
 });
 
 test('callOpenAICompatible sends chat completions through the SillyTavern backend proxy', async () => {
@@ -112,7 +118,14 @@ test('callOpenAICompatible sends chat completions through the SillyTavern backen
   assert.equal(body.chat_completion_source, 'custom');
   assert.equal(body.custom_url, 'https://example-model-host.test/v1');
   assert.equal(body.proxy_password, 'secret-key');
-  assert.equal(body.custom_include_headers, 'Authorization: Bearer secret-key');
+  // ST 后端代理必须带自定义 UA（覆盖 node-fetch 默认），且不能破坏 Authorization 行
+  assert.deepEqual(
+    body.custom_include_headers.split('\n').sort(),
+    [
+      'Authorization: Bearer secret-key',
+      'User-Agent: BS-BioTracker (+https://github.com/Liuuuu54/st_bs_biotracker)',
+    ].sort(),
+  );
   assert.equal(body.model, 'grok-compatible');
   assert.equal(body.stream, false);
   assert.deepEqual(body.response_format, { type: 'json_object' });
@@ -180,6 +193,62 @@ test('callOpenAICompatible falls back to direct access when the SillyTavern prox
     'https://relay.example.test/v1/chat/completions',
   ]);
   assert.equal(calls[1].options.headers.Authorization, 'Bearer relay-key');
+});
+
+test('non-OpenAI API formats translate the request and normalize the response', async () => {
+  const cases = [
+    {
+      format: API_FORMATS.OPENAI_RESPONSES,
+      response: { output_text: JSON.stringify({ operations: [] }) },
+      assertRequest(url, body, headers) {
+        assert.equal(url, 'http://localhost:8000/v1/responses');
+        assert.equal(body.input[0].role, 'developer');
+        assert.equal(body.text.format.type, 'json_object');
+        assert.equal(headers.Authorization, 'Bearer format-key');
+      },
+    },
+    {
+      format: API_FORMATS.CLAUDE_MESSAGES,
+      response: { content: [{ type: 'text', text: JSON.stringify({ operations: [] }) }] },
+      assertRequest(url, body, headers) {
+        assert.equal(url, 'http://localhost:8000/v1/messages');
+        assert.equal(body.system, 'Return JSON.');
+        assert.equal(body.messages[0].role, 'user');
+        assert.equal(headers['anthropic-version'], '2023-06-01');
+        assert.equal(headers['x-api-key'], 'format-key');
+      },
+    },
+    {
+      format: API_FORMATS.GEMINI_INTERACTIONS,
+      response: { status: 'completed', steps: [{ type: 'model_output', content: [{ type: 'text', text: JSON.stringify({ operations: [] }) }] }] },
+      assertRequest(url, body, headers) {
+        assert.equal(url, 'http://localhost:8000/v1/interactions');
+        assert.equal(body.system_instruction, 'Return JSON.');
+        assert.equal(body.input[0].type, 'user_input');
+        assert.equal(headers['x-goog-api-key'], 'format-key');
+      },
+    },
+  ];
+
+  for (const item of cases) {
+    const calls = [];
+    installBrowserHost(async (url, options) => {
+      calls.push({ url, options });
+      return jsonResponse(item.response);
+    });
+    const result = await callOpenAICompatible({
+      apiUrl: 'http://localhost:8000/v1',
+      apiKey: 'format-key',
+      model: 'format-model',
+      apiFormat: item.format,
+    }, { recent_messages: [] }, 'Return JSON.');
+    assert.deepEqual(result, { operations: [] });
+    assert.equal(calls.length, 1);
+    item.assertRequest(calls[0].url, JSON.parse(calls[0].options.body), calls[0].options.headers);
+  }
+
+  assert.equal(normalizeApiFormat('anthropic'), API_FORMATS.CLAUDE_MESSAGES);
+  assert.equal(getApiUrlForFormat('https://example.test', API_FORMATS.GEMINI_INTERACTIONS), 'https://example.test/v1beta/interactions');
 });
 
 test('callOpenAICompatible aborts a hanging request instead of waiting forever', async () => {
