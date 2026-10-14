@@ -157,7 +157,6 @@ import {
   loadCharacterAdditionalWorldBooks,
   loadGlobalWorldBook,
   MODULE_NAME,
-  normalizeApiFormat,
   normalizeCharacterPsychologyState,
   recordChatStateSnapshot,
   listChatStateSnapshots,
