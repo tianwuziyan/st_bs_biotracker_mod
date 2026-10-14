@@ -13,7 +13,7 @@
 <body>
 <div id="harness-info">
   <b>BioTracker UI Harness</b>（mock 宿主，非真实 SillyTavern）<br>
-  点击右下角悬浮球打开手机面板。种子角色：艾拉（卵泡期，wearState 敞开，内衣配件）、贝拉（产后恢复，pregFit 生效）。
+  点击右下角悬浮球打开手机面板。种子角色：艾拉（卵泡期，wearState 敞开，内衣配件，精液灌满）、贝拉（产后恢复，六种 bsRecordExperience action＋五种认知方式，pregFit 生效，精液灌满）、琪拉（孕 30 周六胎：五种胚型＋孕中孕，各种胎儿标签，精液浸满）、妲拉（肩难产）、妮拉（双胎互锁）、莎拉（宫压将流产）、芙拉（延产期，乏力 2 级）、茉拉（刚受精）。
 </div>
 <script type="module">
   const CHAT_KEY = 'ui-harness-chat';
@@ -33,8 +33,8 @@
       bio: {},
       metabolism: { excretion: 20, hunger: 30, sleep: 10, milk: 5, odor: 10, companionship: 15, ...overrides.metabolism },
       descriptions: {
-        normalDescription: '外貌|黑发碧眼，身形修长;;神态|从容微笑;;',
-        pregnantDescription: '',
+        normalDescription: [{ name: '外貌', value: '黑发碧眼，身形修长', updatedAt: 0 }, { name: '神态', value: '从容微笑', updatedAt: 0 }],
+        pregnantDescription: [],
         ...overrides.descriptions,
       },
       experience: { sexCount: 0, birthCount: 0, records: [] },
@@ -49,6 +49,7 @@
   });
 
   const chatState = {
+    schemaVersion: 4,
     skillCatalog: [
       { id: 1, name: '剑术', description: '使用长剑进行攻防的实战技巧。' },
       { id: 2, name: '魔力感知', description: '辨识周遭魔力流动的能力。' },
@@ -70,16 +71,18 @@
       }),
       长女: makeCharacter('长女', { base: { age: 18 }, profile: { children: [] } }),
       艾拉: makeCharacter('艾拉', {
-        // 三个精液来源、量差明显：验证「精液来源」的占比环（两个以上才画）
+        // 三个精液来源、量差明显：验证「精液来源」统一使用占比环；
+        // 总量 130 超过卵泡期初段的容量（约 113）：看未孕的「灌满」（子宫微胀、整片到顶、宫口滴漏）
         base: {
           eggs: 2,
           sperms: [
-            { male: '凯', race: '人类', derivedType: null, value: 24 },
-            { male: '无名旅人', race: '龙族', derivedType: '血族', value: 12 },
-            { male: '古龙', race: '龙族', derivedType: null, value: 5 },
+            { male: '凯', race: '人类', derivedType: null, value: 70 },
+            { male: '无名旅人', race: '西方龙', derivedType: '血族', value: 40 },
+            { male: '古龙', race: '西方龙', derivedType: null, value: 20 },
           ],
         },
         profile: {
+          cognitionRecords: [{ time: '旅途第六日', method: 'guess', content: '她猜测自己可能怀孕，但还没确认。' }],
           // 多项技能：验证「一次列出全部」的排版，其中 skillId 5 已满级走 MAX 分支
           skills: [
             { skillId: 1, level: 3, exp: 120 },
@@ -98,13 +101,13 @@
           ],
           children: [
             // 一般生育 + 已注册成角色（节点会与「长女」合并）
-            { id: 'c1', name: '长女', gender: '女', race: '精灵x人类', fathers: '凯', fatherRace: '人类', age: 18, registeredAs: '长女', talents: [] },
+            { id: 'c1', name: '长女', selectedFather: '故人', gender: '女', race: '精灵x人类', fathers: '凯', fatherRace: '人类', age: 18, registeredAs: '长女', talents: [] },
             // 未注册的路人父亲，带上血统
-            { id: 'c2', name: '次子', gender: '男', race: '精灵x龙族', fathers: '无名旅人', fatherRace: '龙族', fatherDerivedType: '血族', age: 6, talents: [] },
+            { id: 'c2', name: '次子', gender: '男', race: '精灵x西方龙', fathers: '无名旅人', fatherRace: '西方龙', fatherDerivedType: '血族', age: 6, talents: [] },
             // 代孕：艾拉只是承载者，遗传母是琪拉
             { id: 'c3', name: '寄养儿', gender: '女', race: '兽耳族', fathers: '凯', fatherRace: '人类', provider: '琪拉', providerSources: ['琪拉'], age: 3, talents: [] },
             // 嵌合体：两位父源，只连首位，另一位在详情里标注
-            { id: 'c4', name: '融合儿', gender: '双', race: '精灵x龙族', fathers: '凯×无名旅人', fatherRace: '人类x龙族', chimera: { fatherSources: ['凯', '无名旅人'], maternalSources: ['艾拉'] }, age: 1, talents: [] },
+            { id: 'c4', name: '融合儿', gender: '双', race: '精灵x西方龙', fathers: '凯×无名旅人', fatherRace: '人类x西方龙', chimera: { fatherSources: ['凯', '无名旅人'], maternalSources: ['艾拉'] }, age: 1, talents: [] },
             // 自交：父方就是艾拉自己
             { id: 'c5', name: '孤生子', gender: '女', race: '精灵', fathers: '艾拉', fatherRace: '精灵', age: 0, talents: [] },
           ],
@@ -114,47 +117,129 @@
           wardrobe: {
             enabled: true,
             items: [
-              { id: 1, name: '白色连身裙', note: '及膝雪纺，方领。', slot: 'main', parts: ['连身裙'], masking: 6, support: 4, capacity: 3, convenience: 5 },
-              { id: 2, name: '衬衫牛仔裤', note: '白衬衫配直筒牛仔裤。', slot: 'main', parts: ['白衬衫', '牛仔裤'], masking: 7, support: 5, capacity: 4, convenience: 7 },
-              { id: 3, name: '蕾丝内衣', note: '浅色蕾丝，贴身。', slot: 'accessory', layer: 'inner', masking: 0, support: 2, capacity: 0, convenience: 0 },
-              { id: 4, name: '针织外套', note: '米色开衫。', slot: 'accessory', masking: 2, support: 0, capacity: 0, convenience: 0 },
+              { id: 1, name: '白色连身裙', note: '及膝雪纺，方领。', slot: 'main', parts: ['连身裙'], fitProfile: { masking: 'medium', support: 'normal', capacity: 'fitted', convenience: 'normal' } },
+              { id: 2, name: '衬衫牛仔裤', note: '白衬衫配直筒牛仔裤。', slot: 'main', parts: ['白衬衫', '牛仔裤'], fitProfile: { masking: 'high', support: 'normal', capacity: 'fitted', convenience: 'convenient' } },
+              { id: 3, name: '蕾丝内衣', note: '浅色蕾丝，贴身。', slot: 'accessory', category: 'underwear', effects: ['support_up'] },
+              { id: 4, name: '针织外套', note: '米色开衫。', slot: 'accessory', category: 'outerwear', effects: ['masking_up'] },
             ],
           },
-          outfit: { mainItemId: 1, accessoryItemIds: [3, 4], temporaryItems: [], wearState: '敞开', pregFit: null },
+          outfit: { mainItemId: 1, accessoryItemIds: [3, 4], transientItems: [], wearState: '敞开', pregFit: null },
         },
       }),
+      // 宣传取样：孕 30 周六胎，画面上五胎各是一种胚型（胎生／卵生／卵胎生／胎转卵生／不定型），
+      // 胎生那胎体内再怀一胎孕中孕（包在宿主里一起画，不占五胎上限）。
+      // 标签取样：代孕、胎内回归、异期复孕（带伴生卵）、嵌合、自交＋雌核发生、孕中孕。
+      // 精液远超容量：看怀孕的「浸满」（精液填在羊膜囊之间、膜线沾色、宫口细细滴）
       琪拉: makeCharacter('琪拉', {
-        base: { stage: '孕晚期', days: 152, age: 26, eggs: 0 },
-        descriptions: { pregnantDescription: '孕态|腹部高耸，行动迟缓;;' },
+        base: {
+          stage: '孕晚期', days: 14, age: 26, eggs: 0,
+          sperms: [
+            { male: '莱昂', race: '人类', derivedType: null, value: 180 },
+            { male: '无名旅人', race: '西方龙', derivedType: null, value: 120 },
+          ],
+        },
+        descriptions: { pregnantDescription: [{ name: '孕态', value: '六胎撑得腹部巨大，几乎站不稳', updatedAt: 0 }] },
         profile: {
           pregnant: {
-            pregnantDays: 152,
-            effectivePregnantDays: 152,
-            amnionDurability: 82,
-            // 双胎：一胎正亲和（擅长方向）、一胎负亲和（苦手方向），验证胎儿天赋显示
-            // 胎儿标签取样：代孕（推导）／嵌合（推导）／同卵一组两胎（落盘）
+            pregnantDays: 210,
+            effectivePregnantDays: 210,
+            nextEmbryoId: 7,
             fetuses: [
-              { embryoId: 1, fathers: '莱昂', fatherRace: '人类', provider: '艾拉', providerSources: ['艾拉'], embryoType: '胎生', gender: '女', weight: 1.05, tendencyAngle: 30, affinity: 60, talents: [{ skillId: 1, level: 2, exp: 40 }] },
-              { embryoId: 2, fathers: '莱昂 × 无名旅人', fatherRace: '人类x龙族', chimera: { sourceCount: 2, fatherSources: ['莱昂', '无名旅人'], maternalSources: ['琪拉'], genderSources: ['男', '女'] }, embryoType: '胎生', gender: '男', weight: 0.98, tendencyAngle: -20, affinity: -35, talents: [{ skillId: 2, level: -1, exp: -30 }] },
-              { embryoId: 3, fathers: '莱昂', fatherRace: '人类', embryoType: '胎生', gender: '女', weight: 1.0, tendencyAngle: 10, affinity: 20, tags: ['identical'], identicalGroup: 3, talents: [] },
-              { embryoId: 4, fathers: '莱昂', fatherRace: '人类', embryoType: '胎生', gender: '女', weight: 1.0, tendencyAngle: 15, affinity: 20, tags: ['identical'], identicalGroup: 3, talents: [] },
+              // 由左至右、上下错开：卵生（宫顶）→ 胎生（子宫低位，内含孕中孕）→ 胎转卵生（宫顶）→ 卵胎生（子宫低位）→ 不定型（宫内自由）
+              // 卵生・胎内回归（回到子宫里的鸟人）
+              { embryoId: 2, descentStage: -3, fathers: '翼', fatherRace: '鸟人', race: '人类x鸟人', embryoType: '卵生', gender: '男', weight: 0.9, tendencyAngle: 45, affinity: 20, amnionDurability: 85, tags: ['rebirth'], talents: [] },
+              // 胎生・代孕（卵来自艾拉），也是孕中孕的宿主；正亲和验证胎儿天赋
+              { embryoId: 1, descentStage: -1, fathers: '莱昂', fatherRace: '人类', provider: '艾拉', providerSources: ['艾拉'], race: '精灵x人类', embryoType: '胎生', gender: '女', weight: 1.1, tendencyAngle: 0, affinity: 60, amnionDurability: 90, talents: [{ skillId: 1, level: 2, exp: 40 }] },
+              // 胎转卵生・嵌合（两位父源融合）；负亲和验证苦手方向
+              { embryoId: 4, descentStage: -3, fathers: '莱昂 × 无名旅人', fatherRace: '人类x西方龙', chimera: { sourceCount: 2, fatherSources: ['莱昂', '无名旅人'], maternalSources: ['琪拉'], genderSources: ['男', '女'] }, race: '人类x西方龙', embryoType: '胎转卵生', gender: '双', weight: 1.0, tendencyAngle: 180, affinity: -35, amnionDurability: 45, talents: [{ skillId: 2, level: -1, exp: -30 }] },
+              // 卵胎生・异期复孕，带三颗伴生卵；孕龄落后一截
+              { embryoId: 3, descentStage: -1, fathers: '海德', fatherRace: '人鱼', race: '人类x人鱼', embryoType: '卵胎生', gender: '女', weight: 0.85, tendencyAngle: 90, affinity: 10, amnionDurability: 70, conceivedAtDays: 30, companionEggCount: 3, tags: ['superfetation'], revealed: true, talents: [] },
+              // 不定型・自交＋雌核发生（琪拉自己当父方）
+              { embryoId: 5, descentStage: -2, fathers: '琪拉', fatherRace: '人类x史萊姆', race: '人类x史萊姆', embryoType: '不定型', gender: '女', weight: 0.8, tendencyAngle: 270, affinity: 5, amnionDurability: 100, tags: ['gynogenesis'], talents: [] },
+              // 孕中孕：长在 1 号体内，母亲是 1 号、父亲是精液来源
+              { embryoId: 6, fathers: '莱昂', fatherRace: '人类', race: '精灵x人类', embryoType: '胎生', gender: '男', weight: 0.6, tendencyAngle: 0, affinity: 0, nestedInEmbryoId: 1, conceivedAtDays: 60, tags: ['superfetation', 'nested'], revealed: true, talents: [] },
             ],
           },
         },
       }),
+      // 产后恢复也灌满：子宫比未孕大、容量约 120 → 100
       贝拉: makeCharacter('贝拉', {
-        base: { stage: '产后恢复', days: 10, age: 27 },
+        base: { stage: '产后恢复', days: 10, age: 27, eggs: 0, sperms: [{ male: '凯', race: '人类', derivedType: null, value: 140 }] },
         profile: {
+          bio: { recoveryDays: 56 },
+          // 已出生子女和生理经历是工具操作前的背景，child action 只命名／选择身份。
+          experience: { pregnantExperience: 1, naturalBirthExperience: 1 },
+          children: [{ id: 'bella-c1', name: '待命名新生儿', selectedFather: null, gender: '女', race: '人类', fathers: '凯', fatherRace: '人类', age: 0, talents: [] }],
           wardrobe: {
             enabled: true,
             items: [
-              { id: 1, name: '孕妇裙', note: '高腰伞形，弹性面料。', slot: 'main', masking: 6, support: 5, capacity: 8, convenience: 6 },
-              { id: 2, name: '哺乳内衣', note: '前开扣。', slot: 'accessory', layer: 'inner', masking: 0, support: 3, capacity: 0, convenience: 0 },
+              { id: 1, name: '孕妇裙', note: '高腰伞形，弹性面料。', slot: 'main', fitProfile: { masking: 'medium', support: 'normal', capacity: 'stretch', convenience: 'normal' } },
+              { id: 2, name: '哺乳内衣', note: '前开扣。', slot: 'accessory', category: 'underwear', effects: ['support_up'] },
             ],
           },
           outfit: {
-            mainItemId: 1, accessoryItemIds: [2], temporaryItems: [], wearState: '整齐',
+            mainItemId: 1, accessoryItemIds: [2], transientItems: [], wearState: '整齐',
             pregFit: { pregWearPressure: 3.3, gap: { masking: 2.7, support: 4.7, capacity: 4.7, convenience: 2.7 } },
+          },
+        },
+      }),
+      // 子宫图测试：真实分娩模式的肩难产（第 1 胎卡在产道口，会出现闪烁警示框与「!」）
+      妲拉: makeCharacter('妲拉', {
+        base: { stage: '第二产程', days: 0, age: 25, eggs: 0, vitality: 0, uterinePressure: 150 },
+        profile: {
+          immune: { realisticLabor: true },
+          pregnant: {
+            pregnantDays: 280, effectivePregnantDays: 280, laborPhase: '胎体娩出', laborBirthNumber: 1, presentingEmbryoId: 1,
+            fetuses: [
+              { embryoId: 1, fathers: '莱昂', fatherRace: '人类', embryoType: '胎生', gender: '男', weight: 1.2, tendencyAngle: 0, affinity: 10, amnionDurability: 0, descentStage: 3, shoulderDystocia: true, talents: [] },
+              { embryoId: 2, fathers: '莱昂', fatherRace: '人类', embryoType: '胎生', gender: '女', weight: 1.0, tendencyAngle: 180, affinity: -10, amnionDurability: 70, descentStage: -1, talents: [] },
+            ],
+          },
+        },
+      }),
+      // 子宫图测试：双胎互锁（臀位的先露胎与头位的第二胎在入口下巴互勾；第一产程，真实分娩模式）
+      妮拉: makeCharacter('妮拉', {
+        base: { stage: '第一产程', days: 0, age: 23, eggs: 0, uterinePressure: 120 },
+        profile: {
+          immune: { realisticLabor: true },
+          pregnant: {
+            pregnantDays: 275, effectivePregnantDays: 275, laborPhase: '活跃期', presentingEmbryoId: 1,
+            fetuses: [
+              { embryoId: 1, fathers: '凯', fatherRace: '人类', embryoType: '胎生', gender: '女', weight: 0.95, tendencyAngle: 180, affinity: 5, amnionDurability: 40, descentStage: 0, talents: [] },
+              { embryoId: 2, fathers: '凯', fatherRace: '人类', embryoType: '胎生', gender: '女', weight: 0.95, tendencyAngle: 0, affinity: -30, amnionDurability: 60, descentStage: 0, inletIntruder: true, talents: [] },
+            ],
+          },
+        },
+      }),
+      // 子宫图测试：孕中期宫压过高且已警告过（子宫图下方闪烁「宫压未缓解，即将流产」）
+      莎拉: makeCharacter('莎拉', {
+        base: { stage: '孕中期', days: 40, age: 24, eggs: 0, uterinePressure: 999 },
+        profile: {
+          cooldown: { pregnancyPressureWarning: true },
+          pregnant: {
+            pregnantDays: 130, effectivePregnantDays: 130,
+            fetuses: [{ embryoId: 1, fathers: '凯', fatherRace: '人类', embryoType: '胎生', gender: '男', weight: 1.0, tendencyAngle: 90, affinity: -20, talents: [] }],
+          },
+        },
+      }),
+      // 子宫图测试：延产期第 3 次延产、子宫乏力 2 级（宫颈封口＋宫壁细纹）
+      芙拉: makeCharacter('芙拉', {
+        base: { stage: '延产期', days: 106, age: 28, eggs: 0, uterinePressure: 30, uterineAtony: 2 },
+        profile: {
+          pregnant: {
+            pregnantDays: 400, effectivePregnantDays: 400, extensionCount: 3, extensionUntilDays: 420,
+            fetuses: [{ embryoId: 1, fathers: '凯', fatherRace: '人类', embryoType: '胎生', gender: '女', weight: 1.1, tendencyAngle: 0, affinity: 12, descentStage: -1, talents: [] }],
+          },
+        },
+      }),
+      // 子宫图测试：刚受精（打开妊娠分页会播一次受精特写，之后可按右下角重播）
+      茉拉: makeCharacter('茉拉', {
+        base: { stage: '黄体期', days: 1, age: 22, eggs: 0, fertilizationDays: 0.3, sperms: [{ male: '凯', race: '人类', derivedType: null, value: 35 }] },
+        profile: {
+          visualCue: { type: 'fertilization', seq: 1 },
+          pregnant: {
+            pregnantDays: 0, effectivePregnantDays: 0,
+            fetuses: [{ embryoId: 1, fathers: '凯', fatherRace: '人类', embryoType: '胎生', gender: '女', weight: 1.0, tendencyAngle: 0, affinity: 0, talents: [] }],
           },
         },
       }),
@@ -176,7 +261,6 @@
         theme: 'retro',
         deviceSize: 'phone',
         fontSize: 'standard',
-        triggerTiming: 'after_ai',
         targetNames: '',
         chatStates: { [CHAT_KEY]: chatState },
       },
@@ -207,6 +291,115 @@
       charLore: [{ name: 'aila', extraBooks: ['性格适配衣橱'] }],
     },
   };
+
+  // 全部经公开分派器套用，避免直接塞最终状态掩盖 action 接线问题。
+  // 故事日期只用于叙事，不推进产后恢复的系统时钟。
+  const { applyToolCall } = await import('/scripts/tools.js');
+  const bellaExperienceSamples = [
+    { action: 'date', time: '旅途第1日', partner: '旧恋人' },
+    { action: 'date', time: '旅途第2日', partner: '凯' },
+    { action: 'date', time: '旅途第3日', partner: '莉雅' },
+    { action: 'breakup', time: '旅途第4日', partner: '旧恋人' },
+    { action: 'marry', time: '旅途第5日', partner: '前配偶' },
+    { action: 'divorce', time: '旅途第6日', partner: '前配偶' },
+    { action: 'marry', time: '旅途第7日', partner: '莱昂' },
+    { action: 'marry', time: '旅途第8日', partner: '莉雅' },
+    { action: 'cognition', time: '旅途第28日', method: 'perception', content: '月经迟迟没来，她注意到身体变化，但以为只是旅途劳累。' },
+    { action: 'cognition', time: '旅途第30日', method: 'guess', content: '她猜测自己可能怀孕，尚未确认。\n腹部变化也可能只是发胖。' },
+    { action: 'cognition', time: '旅途第35日', method: 'informed', content: '助产士告诉她可能怀孕；她听进了建议，但仍有疑虑。' },
+    { action: 'cognition', time: '旅途第42日', method: 'test', content: '验孕结果呈阳性，她据此相信自己已经怀孕。' },
+    { action: 'cognition', time: '旅途第100日', method: 'prenatal', content: '产检时被告知是一名单胎；这是她记住的报告内容，不代表工具替她确认了客观胎数。' },
+    { action: 'child', time: '产后第10日', childIndex: 0, name: '星禾', selectedFather: '莱昂' },
+  ];
+  const sampleDetails = document.createElement('details');
+  sampleDetails.id = 'harness-bella-experience';
+  const sampleSummary = document.createElement('summary');
+  sampleSummary.textContent = '贝拉：六种 bsRecordExperience action 的工具样本（展开查看）';
+  const sampleList = document.createElement('ol');
+  bellaExperienceSamples.forEach((args, index) => {
+    const result = applyToolCall(chatState, {
+      name: 'bsRecordExperience', arguments: { female: '贝拉', ...args }, sourceId: `harness:bella:experience:${index}`,
+    });
+    if (!result.applied) throw new Error(`贝拉样本 ${args.action} 未套用：${result.message}`);
+    const row = document.createElement('li');
+    row.dataset.action = args.action;
+    if (args.method) row.dataset.method = args.method;
+    row.dataset.applied = String(result.applied);
+    row.textContent = `${args.time} · ${args.action}${args.method ? ' / ' + args.method : ''} · ${args.partner || args.content || `${args.name}，选定父亲 ${args.selectedFather}`} · 已套用`;
+    sampleList.appendChild(row);
+  });
+  sampleDetails.append(sampleSummary, sampleList);
+  document.getElementById('harness-info').appendChild(sampleDetails);
+
+  // 族谱种族图示展示：/tests/ui-harness.html?lineage=1 另外种一个三代家族，不动原有测试角色。
+  // 每人一个衍生外框（11 种），混血拼色底从两块到五块；九尾 50／50 平手时按母方取妖狐。
+  // 追踪 → 莉瑟 → 经历 → 族谱。
+  if (new URLSearchParams(location.search).get('lineage') === '1') {
+    const q = 0.25, e = 0.125;
+    const lise = { 妖狐: q, 白泽: q, 精灵: q, 矮人: q };
+    const halfLise = (other) => ({ 妖狐: e, 白泽: e, 精灵: e, 矮人: e, [other]: 0.5 });
+    const kid = (fields) => ({ talents: [], ...fields });
+    const seed = (name, base, children) => {
+      chatState.characters[name] = makeCharacter(name, { base: { isHere: false, ...base }, profile: { children } });
+    };
+    seed('玉藻', { race: '妖狐', bloodline: { 妖狐: 1 }, bloodlineSource: 'pure', derivedType: '神祇', age: 900 }, [
+      kid({ id: 'show-1', name: '九尾', gender: '女', race: '妖狐x白泽', bloodline: { 妖狐: 0.5, 白泽: 0.5 }, derivedType: '妖怪', fathers: '泽', fatherRace: '白泽', fatherDerivedType: '修炼', age: 300, registeredAs: '九尾' }),
+    ]);
+    seed('艾莉丝', { race: '精灵', bloodline: { 精灵: 1 }, bloodlineSource: 'pure', derivedType: '魔导', age: 260 }, [
+      kid({ id: 'show-2', name: '洛恩', gender: '男', race: '精灵x矮人', bloodline: { 精灵: 0.5, 矮人: 0.5 }, derivedType: '兽化', fathers: '格雷', fatherRace: '矮人', fatherDerivedType: '器灵', age: 140, registeredAs: '洛恩' }),
+    ]);
+    seed('九尾', { race: '妖狐x白泽', bloodline: { 妖狐: 0.5, 白泽: 0.5 }, bloodlineSource: 'inherited', derivedType: '妖怪', age: 300 }, [
+      kid({ id: 'show-3', name: '莉瑟', gender: '女', race: '妖狐x白泽x精灵x矮人', bloodline: lise, derivedType: '变异', fathers: '洛恩', fatherRace: '精灵x矮人', fatherBloodline: { 精灵: 0.5, 矮人: 0.5 }, fatherDerivedType: '兽化', age: 24, registeredAs: '莉瑟' }),
+    ]);
+    seed('洛恩', { race: '精灵x矮人', bloodline: { 精灵: 0.5, 矮人: 0.5 }, bloodlineSource: 'inherited', derivedType: '兽化', age: 140 }, []);
+    seed('莉瑟', { race: '妖狐x白泽x精灵x矮人', bloodline: lise, bloodlineSource: 'inherited', derivedType: '变异', age: 24, isHere: true }, [
+      kid({ id: 'show-5', name: '红鳞', gender: '男', race: '妖狐x白泽x精灵x矮人x西方龙', bloodline: halfLise('西方龙'), derivedType: '血族', fathers: '夜王', fatherRace: '西方龙', fatherDerivedType: '不死', age: 3 }),
+      kid({ id: 'show-6', name: '汐', gender: '女', race: '妖狐x白泽x精灵x矮人x人鱼', bloodline: halfLise('人鱼'), fathers: '海德', fatherRace: '人鱼', age: 1 }),
+      kid({ id: 'show-7', name: '零', gender: '无', race: '妖狐x白泽x精灵x矮人x宝石人', bloodline: halfLise('宝石人'), derivedType: '机械', fathers: '晶', fatherRace: '宝石人', age: 0 }),
+    ]);
+    const note = document.createElement('div');
+    note.textContent = '已加载族谱展示家族：追踪名单选择「莉瑟」→ 经历 → 族谱。';
+    document.getElementById('harness-info').appendChild(note);
+  }
+
+  // 写实世界族谱：/tests/ui-harness.html?realistic=1 开启写实世界，另种一个三代人类家族，
+  // 一次涵盖精方、卵方（代孕的卵源）与婴儿到长者六段。追踪 → 外婆 → 经历 → 族谱。
+  if (new URLSearchParams(location.search).get('realistic') === '1') {
+    ctx.extensionSettings.bs_biotracker.realisticWorld = true;
+    const kid = (fields) => ({ talents: [], race: '人类', bloodline: { 人类: 1 }, ...fields });
+    const seed = (name, base, children) => {
+      chatState.characters[name] = makeCharacter(name, { base: { isHere: false, race: '人类', bloodline: { 人类: 1 }, bloodlineSource: 'pure', ...base }, profile: { children } });
+    };
+    seed('外婆', { age: 72 }, [
+      kid({ id: 'real-1', name: '妈妈', gender: '女', fathers: '外公', age: 47, registeredAs: '妈妈' }),
+    ]);
+    seed('妈妈', { age: 47 }, [
+      kid({ id: 'real-2', name: '晓雯', gender: '女', fathers: '爸爸', age: 24, registeredAs: '晓雯' }),
+      kid({ id: 'real-3', name: '妹妹', gender: '女', fathers: '爸爸', age: 15 }),
+      kid({ id: 'real-4', name: '弟弟', gender: '男', fathers: '爸爸', age: 8 }),
+    ]);
+    seed('晓雯', { age: 24, isHere: true }, [
+      kid({ id: 'real-5', name: '宝宝', gender: '男', fathers: '丈夫', age: 1 }),
+      kid({ id: 'real-6', name: '代孕女', gender: '女', fathers: '丈夫', provider: '捐卵者', age: 0 }),
+    ]);
+    const note = document.createElement('div');
+    note.textContent = '已开启写实世界并加载人类家族：追踪名单选择「晓雯」→ 经历 → 族谱。';
+    document.getElementById('harness-info').appendChild(note);
+  }
+
+  // Optional stage matrix: /tests/ui-harness.html?progress=1 keeps the ordinary seeds intact.
+  if (new URLSearchParams(location.search).get('progress') === '1') {
+    const { stageProgressFixtures } = await import('/tests/stage-progress-fixtures.mjs');
+    const fixtures = stageProgressFixtures();
+    fixtures.forEach(({ id, profile }) => {
+      const label = id.replace('-start', '·起点').replace('-half', '·中段').replace('-end', '·终点');
+      const name = `进度·${label}`;
+      chatState.characters[name] = { name, initialized: true, profile };
+    });
+    const note = document.createElement('div');
+    note.textContent = `已加载 ${fixtures.length} 个阶段／子阶段进度样本：追踪名单选择「进度·」角色查看概览。`;
+    document.getElementById('harness-info').appendChild(note);
+  }
 
   await import('/index.js');
 

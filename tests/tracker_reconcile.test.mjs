@@ -51,15 +51,6 @@ test('auto retry is blocked while the conversation is unchanged, even if an inne
   assert.equal(isFailedAutoRetryBlocked(ctx, chatState), false);
 });
 
-test('legacy chat states without the chat signature keep the old tail behaviour', () => {
-  const ctx = makeCtx([{ is_user: false, name: 'Alice', mes: 'only' }]);
-  globalThis.SillyTavern = { getContext: () => ctx };
-  const chatState = state.createEmptyChatState();
-  chatState.lastFailedChatSignature = '';
-  chatState.lastFailedSignature = state.buildSignature(ctx, ctx.chat.length);
-  assert.equal(isFailedAutoRetryBlocked(ctx, chatState), true);
-});
-
 test('a result whose message was deleted mid-request is discarded instead of applied', async () => {
   const ctx = makeCtx([
     { is_user: false, name: 'Alice', mes: 'kept message' },
@@ -142,7 +133,6 @@ test('a long chat without snapshots replays a bounded window instead of every me
   settings.apiUrl = 'https://example.test/v1';
   settings.model = 'test-model';
   settings.contextSize = 12;
-  settings.triggerTiming = 'after_ai';
   const chatState = state.getChatState(ctx, settings);
   chatState.characters['艾拉'] = { name: '艾拉', initialized: true, profile: { base: {} } };
   chatState.snapshots = [];
@@ -170,7 +160,6 @@ test('a lost snapshot resumes from the last processed message rather than from z
   settings.apiUrl = 'https://example.test/v1';
   settings.model = 'test-model';
   settings.contextSize = 12;
-  settings.triggerTiming = 'after_ai';
   const chatState = state.getChatState(ctx, settings);
   chatState.characters['艾拉'] = { name: '艾拉', initialized: true, profile: { base: {} } };
 
@@ -370,7 +359,14 @@ test('manual replay uses the previous floor as baseline and replaces the current
 
   await runTracker(ctx, makeDeps(), 'manual');
 
-  assert.deepEqual(chatState.characters.F.profile.base.sperms, [{ male: 'A', race: '人类', value: 25, derivedType: null }]);
+  assert.deepEqual(chatState.characters.F.profile.base.sperms, [{
+    male: 'A',
+    race: '人类',
+    value: 25,
+    bloodline: { '人类': 1 },
+    bloodlineSource: 'pure',
+    derivedType: null,
+  }]);
   assert.equal(chatState.snapshots.filter((snapshot) => snapshot.messageCount === 3).length, 1);
   assert.equal(chatState.snapshots.some((snapshot) => snapshot.messageCount > 3), false);
 });
@@ -451,4 +447,50 @@ test('legacy operations with function-style calls apply a presence update', asyn
   assert.equal(chatState.lastOperationLogs[0]?.name, 'bsSetCharacterPresence');
   assert.deepEqual(chatState.lastRawResult?.character_checks, [{ female: '艾拉', status: 'present' }]);
   assert.deepEqual(chatState.lastRawResult?.character_check_coverage?.missing, []);
+});
+
+test('the tracker marks floors it already analyzed so they are not settled twice', async () => {
+  const ctx = makeCtx([
+    { is_user: false, name: 'Alice', mes: 'opening' },
+    { is_user: true, name: 'User', mes: 'train sword' },
+    { is_user: false, name: 'Alice', mes: 'she trains for three hours' },
+    { is_user: true, name: 'User', mes: 'learn to ride' },
+    { is_user: false, name: 'Alice', mes: 'she rides a horse' },
+  ]);
+  globalThis.SillyTavern = { getContext: () => ctx };
+  const settings = state.getSettings(ctx);
+  settings.apiUrl = 'https://example.test/v1';
+  settings.model = 'test-model';
+  const chatState = state.getChatState(ctx, settings);
+  chatState.characters['艾拉'] = { name: '艾拉', initialized: true, profile: { base: {} } };
+  chatState.snapshots = [];
+  // 第 0–2 楼已实际分析；第 3 楼是使用者讯息，只记了 skip，从没送去分析
+  state.recordChatStateSnapshot(ctx, chatState, { messageCount: 3, reason: 'tracker' });
+  state.recordChatStateSnapshot(ctx, chatState, { messageCount: 4, reason: 'skip' });
+
+  const sent = [];
+  globalThis.fetch = async (url, init) => {
+    sent.push(String(init?.body || ''));
+    return jsonResponse({ choices: [{ message: { content: JSON.stringify({ tool_calls: [] }) } }] });
+  };
+  await runTracker(ctx, makeDeps(), 'manual');
+
+  assert.equal(sent.length, 1);
+  const body = JSON.parse(sent[0]);
+  const payloadText = body.messages.map((m) => String(m.content || '')).find((text) => text.includes('"recent_messages"'));
+  // 只截出 recent_messages 这个阵列（payload 前后还夹着说明文字）
+  const start = payloadText.indexOf('[', payloadText.indexOf('"recent_messages"'));
+  let depth = 0; let end = start;
+  for (; end < payloadText.length; end += 1) {
+    if (payloadText[end] === '[') depth += 1;
+    else if (payloadText[end] === ']' && --depth === 0) break;
+  }
+  const recent = JSON.parse(payloadText.slice(start, end + 1));
+  const marks = recent.map((m) => [m.text, Boolean(m.already_settled)]);
+  assert.deepEqual(marks, [
+    ['opening', true], ['train sword', true], ['she trains for three hours', true],
+    ['learn to ride', false], ['she rides a horse', false],
+  ]);
+  const system = body.messages.find((m) => m.role === 'system')?.content || '';
+  assert.match(system, /只结算新讯息/);
 });

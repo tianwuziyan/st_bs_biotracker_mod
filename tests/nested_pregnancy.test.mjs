@@ -39,7 +39,7 @@ function one({ effectiveDays = 60, sperm = 150, hosts = [fetus({ weight: 1.6 })]
       },
       pregnant: {
         pregnantDays: effectiveDays, effectivePregnantDays: effectiveDays,
-        fetusesCount: hosts.length, fetalEnergyDrain: 0.2, amnionDurability: 100,
+        fetusesCount: hosts.length, fetalEnergyDrain: 0.2,
         fetuses: hosts,
       },
       experience: {}, immune: {}, metabolism: {},
@@ -131,6 +131,53 @@ test('待著床的胚胎不能当宿主', () => {
   assert.equal(nestedOf(chatState).nestedInEmbryoId, 1, '更重的那颗还没著床，不该被选中');
 });
 
+test('卵生、卵胎生进不去：再重也不当宿主，退回普通异期胎或改挑别胎', () => {
+  const eggOnly = one({ hosts: [fetus({ embryoId: 1, weight: 2.0, embryoType: '卵生' }), fetus({ embryoId: 2, weight: 2.0, embryoType: '卵胎生' })] });
+  conceiveOnce(eggOnly);
+  assert.equal(nestedOf(eggOnly), undefined, '在壳或卵膜里，精液碰不到');
+  assert.ok(lateOf(eggOnly), '异期受精本身仍成立');
+
+  const mixed = one({ hosts: [fetus({ embryoId: 1, weight: 2.5, embryoType: '卵生' }), fetus({ embryoId: 2, weight: 1.6, embryoType: '不定型' })] });
+  conceiveOnce(mixed);
+  assert.equal(nestedOf(mixed).nestedInEmbryoId, 2, '跳过更重的卵生，挑进得去的不定型');
+});
+
+test('宿主不看性别：只有男胎也能怀孕中孕', () => {
+  const chatState = one({ hosts: [fetus({ embryoId: 1, weight: 1.8, gender: '男', embryoType: '胎转卵生' })] });
+  conceiveOnce(chatState);
+  assert.equal(nestedOf(chatState).nestedInEmbryoId, 1);
+});
+
+test('胎转卵生宿主里的内胎破不了膜：破膜被拒，耐久归零也不会被解绑', () => {
+  const chatState = one({
+    effectiveDays: 270, sperm: 0,
+    hosts: [
+      fetus({ embryoId: 1, weight: 1.8, embryoType: '胎转卵生' }),
+      fetus({ embryoId: 2, fathers: '乙', conceivedAtDays: 60, nestedInEmbryoId: 1, revealed: true, tags: ['superfetation', 'nested'] }),
+    ],
+  });
+  P(chatState).base.stage = '产兆前驱';
+  P(chatState).base.uterinePressure = 150;
+  const refused = applyToolCall(chatState, { name: 'bsAssistFetalPosition', arguments: { female: 'A', action: 'rupture', fetusIndex: 1 } });
+  assert.equal(refused.applied, false);
+  assert.match(refused.message, /sealed inside a 胎转卵生 host/);
+
+  // 就算旧资料的耐久已经归零，也不会被解绑
+  nestedOf(chatState).amnionDurability = 0;
+  applyToolCall(chatState, { name: 'bsPassedTime', arguments: { hour: 1 } });
+  assert.equal(nestedOf(chatState).nestedReleased, undefined);
+});
+
+test('调试注入孕中孕也挡住卵生、卵胎生宿主', () => {
+  const chatState = one({ effectiveDays: 60, hosts: [fetus({ embryoId: 1, weight: 1.8, embryoType: '卵生' })] });
+  const result = applyToolCall(chatState, {
+    name: 'bsDebugInjectPregnancy',
+    arguments: { female: 'A', mode: 'nested', hostFetusIndex: 0, father: '乙', race: '人类', fetusCount: 1 },
+  });
+  assert.equal(result.applied, false);
+  assert.match(result.message, /不能当孕中孕宿主/);
+});
+
 test('孕中孕藏到孕晚期才揭晓，比一般异期胎晚一整个孕中期', () => {
   const chatState = one({
     effectiveDays: 80, sperm: 0,
@@ -145,7 +192,8 @@ test('孕中孕藏到孕晚期才揭晓，比一般异期胎晚一整个孕中�
   assert.equal(nestedOf(chatState).revealed, undefined, '孕中期还不该揭晓');
   assert.equal(P(chatState).pregnant.fetuses.filter(isFetusKnownToCharacter).length, 1);
 
-  while (P(chatState).pregnant.effectivePregnantDays < 190) step(chatState);
+  while (P(chatState).base.stage === '孕中期') step(chatState);
+  assert.equal(P(chatState).base.stage, '孕晚期');
   assert.equal(nestedOf(chatState).revealed, true, '到孕晚期才揭晓');
   assert.equal(P(chatState).pregnant.fetuses.filter(isFetusKnownToCharacter).length, 2);
 });
@@ -185,8 +233,8 @@ test('出生后母亲解析成宿主孩子的稳定 id，血缘图上母亲是�
   assert.equal(hostChild.birthEmbryoId, nestedChild.nestedInEmbryoId);
 
   applyToolCall(built, {
-    name: 'bsNameChild',
-    arguments: { female: 'A', childIndex: children.indexOf(hostChild), name: '宿主女' },
+    name: 'bsRecordExperience',
+    arguments: { female: 'A', action: 'child', time: '今日', childIndex: children.indexOf(hostChild), name: '宿主女' },
   });
   const view = buildLineageView(built, 'A');
   const nestedNode = view.nodes.find((node) => node.childId === nestedChild.id);
@@ -221,6 +269,41 @@ test('注册：同卵只标 tags 也会被自动归组', () => {
   assert.ok(a.identicalGroup > 0);
 });
 
+test('注册：两组同卵用 identicalGroup 区分，组号换成组内第一胎的编号', () => {
+  const fetuses = register([
+    ...Array.from({ length: 4 }, () => F({ gender: '男', tags: ['identical'], identicalGroup: 1 })),
+    ...Array.from({ length: 3 }, () => F({ gender: '女', tags: ['identical'], identicalGroup: 2 })),
+  ]);
+  assert.equal(fetuses.length, 7);
+  const groups = fetuses.map((fetus) => fetus.identicalGroup);
+  assert.deepEqual(groups, [...Array(4).fill(fetuses[0].embryoId), ...Array(3).fill(fetuses[4].embryoId)]);
+  assert.notEqual(fetuses[0].embryoId, fetuses[4].embryoId);
+});
+
+test('注册：没给组别时按性别等遗传栏位自动分成两组', () => {
+  const fetuses = register([
+    ...Array.from({ length: 4 }, () => F({ gender: '男', tags: ['identical'] })),
+    ...Array.from({ length: 3 }, () => F({ gender: '女', tags: ['identical'] })),
+  ]);
+  const sizes = Object.values(Object.groupBy(fetuses, (fetus) => fetus.identicalGroup)).map((group) => group.length).sort();
+  assert.deepEqual(sizes, [3, 4]);
+});
+
+test('注册：一组超过 4 胎会自动拆组，组内性别与父方以第一胎为准', () => {
+  const fetuses = register([
+    F({ gender: '男', tags: ['identical'], identicalGroup: 9 }),
+    F({ gender: '女', fathers: '乙', tags: ['identical'], identicalGroup: 9 }),
+    ...Array.from({ length: 5 }, () => F({ gender: '男', tags: ['identical'], identicalGroup: 9 })),
+  ]);
+  const groups = Object.values(Object.groupBy(fetuses, (fetus) => fetus.identicalGroup));
+  assert.ok(groups.every((group) => group.length >= 2 && group.length <= 4), groups.map((g) => g.length).join('+'));
+  assert.equal(groups.reduce((sum, group) => sum + group.length, 0), 7);
+  for (const group of groups) {
+    assert.equal(new Set(group.map((fetus) => fetus.gender)).size, 1);
+    assert.equal(new Set(group.map((fetus) => fetus.fathers)).size, 1);
+  }
+});
+
 test('注册：落单的同卵会被撤销，不留自相矛盾的标签', () => {
   const [only] = register([F({ tags: ['identical'] })]);
   assert.equal(only.tags, undefined);
@@ -250,6 +333,29 @@ test('注册：孕中孕用阵列下标指宿主，会换成内部编号', () =>
   assert.equal(inner.nestedInEmbryoId, host.embryoId);
   assert.deepEqual(inner.tags.sort(), ['nested', 'superfetation'].sort(), '孕中孕同时也是异期胎');
   assert.equal(inner.nestedInIndex, undefined, '下标是输入用的，不该留在状态里');
+});
+
+test('注册：宿主是卵生或卵胎生时撤销孕中孕，退回普通异期胎', () => {
+  for (const embryoType of ['卵生', '卵胎生']) {
+    const [, inner] = register([
+      F({ weight: 1.6, embryoType }),
+      F({ fathers: '乙', tags: ['nested'], conceivedAtDays: 60, nestedInIndex: 0 }),
+    ]);
+    assert.equal(inner.nestedInEmbryoId, undefined, `${embryoType} 在壳或卵膜里，进不去`);
+    assert.deepEqual(inner.tags, ['superfetation'], '仍是异期胎');
+  }
+});
+
+test('注册：揭晓门槛跟孕期曆一致，一般异期胎 14 周、孕中孕 28 周', () => {
+  const late = (pregnantDays) => register([F(), F({ fathers: '乙', tags: ['superfetation'], conceivedAtDays: 30 })], pregnantDays)[1];
+  assert.equal(late(97).revealed, undefined, '13 周 6 天还藏着');
+  assert.equal(late(98).revealed, true);
+  const nested = (pregnantDays) => register([
+    F({ weight: 1.6 }),
+    F({ fathers: '乙', tags: ['nested'], conceivedAtDays: 60, nestedInIndex: 0 }),
+  ], pregnantDays)[1];
+  assert.equal(nested(195).revealed, undefined);
+  assert.equal(nested(196).revealed, true);
 });
 
 test('注册：孕中孕指向自己时撤销标签，不留指向虚空的关系', () => {

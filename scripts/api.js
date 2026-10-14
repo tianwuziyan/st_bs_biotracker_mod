@@ -1,8 +1,19 @@
-import { API_FORMATS, DEFAULT_SYSTEM_PROMPT, getApiUrlForFormat, normalizeApiFormat } from './state.js'
-import { getHostChat, getHostChatCompletionSettings, getHostContext, getHostKind, getHostPreset, getHostPresetManager, getHostWorldInfoPrompt } from './host.js'
-const DEBUG_LAST_EFFECTIVE_REQUEST_KEY = '__bs_biotracker_debug_last_effective_request__'
-const DEBUG_LAST_API_RESPONSE_KEY = '__bs_biotracker_debug_last_api_response__'
-const INCLUDE_MAINFLOW_CHAT_MESSAGES = true
+import { API_FORMATS, DEFAULT_SYSTEM_PROMPT, getApiUrlForFormat, normalizeApiFormat, normalizeWorldbookMode, normalizeReasoningEffort, normalizeTemperatureMode, resolveUserTemperature } from './state.js';
+import { resolveHostWorldInfo } from './worldinfo_resolve.js';
+import { markOwnRequest } from './own_requests.js';
+import {
+  getHostChat,
+  getHostChatCompletionSettings,
+  getHostContext,
+  getHostKind,
+  getHostPreset,
+  getHostPresetManager,
+  getHostWorldInfoPrompt,
+} from './host.js';
+
+const DEBUG_LAST_EFFECTIVE_REQUEST_KEY = '__bs_biotracker_debug_last_effective_request__';
+const DEBUG_LAST_API_RESPONSE_KEY = '__bs_biotracker_debug_last_api_response__';
+const INCLUDE_MAINFLOW_CHAT_MESSAGES = true;
 const MAINFLOW_SYSTEM_EXCLUDE_PATTERNS = [
   // Only exclude messages that would instruct the tracker LLM to adopt a
   // conflicting persona.  Keep everything else — worldbook content, resolved
@@ -69,10 +80,10 @@ export function getApiBase(settings) {
   apiBase = apiBase.replace(/\/(chat\/completions|models|responses|messages|interactions)$/i, '')
   return apiBase.replace(/\/+$/, '')
 }
-export function getAuthHeaders(settings) {
-  const headers = { 'Content-Type': 'application/json' }
-  const key = settings.apiKey ? String(settings.apiKey) : ''
-  const format = normalizeApiFormat(settings?.apiFormat)
+export function getAuthHeaders(settings, sessionId = '') {
+  const headers = { 'Content-Type': 'application/json' };
+  const key = settings.apiKey ? String(settings.apiKey) : '';
+  const format = normalizeApiFormat(settings?.apiFormat);
   if (format === API_FORMATS.CLAUDE_MESSAGES) {
     headers['anthropic-version'] = '2023-06-01'
     if (key) {
@@ -84,8 +95,92 @@ export function getAuthHeaders(settings) {
   } else if (key) {
     headers.Authorization = `Bearer ${key}`
   }
-  return headers
+  // OpenCode Go 凭 x-opencode-session 做路由与 prompt 缓存；只在调用方
+  // 显式算出会话 ID 时才带（见 buildOpenCodeSessionId），非 opencode 渠道恒为空
+  if (isValidOpenCodeSessionId(sessionId)) headers[OPENCODE_SESSION_HEADER] = String(sessionId);
+  return headers;
 }
+/**
+ * OpenCode Go 会话头（https://opencode.ai/docs/go/#where-can-i-use-it）：
+ * 每个 conversation 发稳定的 x-opencode-session，供服务端做路由与 prompt 缓存。
+ * 只有 hostname 归属 opencode.ai 的 endpoint 才带，其他渠道一律不带。
+ */
+const OPENCODE_SESSION_HEADER = 'x-opencode-session';
+const OPENCODE_FLOW_NAMES = ['tracker', 'registry', 'wardrobe', 'outfit', 'diary', 'skill', 'breeding'];
+
+/** 汇点最后校验：非法值直接丢弃，防换行/伪造头注入。 */
+function isValidOpenCodeSessionId(sessionId) {
+  return /^bsbt-[a-z]+-[0-9a-f]{8}$/.test(String(sessionId || ''));
+}
+
+export function isOpenCodeApiBase(apiBase) {
+  const raw = String(apiBase || '').trim();
+  if (!raw) return false;
+  const candidates = raw.includes('://') ? [raw] : [`https://${raw}`];
+  for (const candidate of candidates) {
+    try {
+      const host = new URL(candidate).hostname.toLowerCase();
+      if (host === 'opencode.ai' || host.endsWith('.opencode.ai')) return true;
+    } catch {}
+  }
+  return false;
+}
+
+/** 调用方显式 flow 优先；没传时按 payload 有无 target_character 区分追踪/注册。 */
+export function resolveOpenCodeFlow(payload, explicitFlow = '') {
+  const normalized = String(explicitFlow || '').trim().toLowerCase();
+  if (OPENCODE_FLOW_NAMES.includes(normalized)) return normalized;
+  const target = payload && typeof payload === 'object' ? String(payload.target_character || '').trim() : '';
+  return target ? 'registry' : 'tracker';
+}
+
+/**
+ * 卡独立性：注册类按目标角色名区分，追踪按当前角色卡名区分。
+ * 名称只做哈希输入、不进头值——CJK 名直接放 header 会触发 fetch 的 ByteString 校验。
+ */
+function resolveOpenCodeCardKey(payload) {
+  if (!payload || typeof payload !== 'object') return '';
+  const target = String(payload.target_character || '').trim();
+  if (target) return target;
+  const current = payload.current_character && typeof payload.current_character === 'object'
+    ? String(payload.current_character.name || '').trim()
+    : '';
+  return current;
+}
+
+/**
+ * 聊天粒度：同卡不同聊天分属不同会话，否则两个聊天的不同前缀交替冲刷缓存。
+ * 缺 chat_id 时回退到卡级（旧行为），只损命中率、不影响正确性。
+ */
+function resolveOpenCodeChatKey(payload) {
+  if (!payload || typeof payload !== 'object') return '';
+  return String(payload.chat_id || '').trim();
+}
+
+function hashOpenCodeSessionKey(text) {
+  let hash = 0x811c9dc5;
+  const input = String(text || '');
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+/**
+ * 会话 ID 形如 bsbt-tracker-9f3ac2e1：flow×卡×聊天三维隔离，各自的 prompt 前缀
+ * 缓存互不冲刷；纯函数推导、无需持久化，重载页面后保持不变、缓存继续命中。
+ * 非 opencode endpoint 返回空字符串，调用方以此决定带不带头。
+ */
+export function buildOpenCodeSessionId(apiBase, payload, explicitFlow = '') {
+  if (!isOpenCodeApiBase(apiBase)) return '';
+  const flow = resolveOpenCodeFlow(payload, explicitFlow);
+  const cardKey = resolveOpenCodeCardKey(payload);
+  const chatKey = resolveOpenCodeChatKey(payload);
+  // 数组序列化做哈希输入：分隔符无歧义，单行假设不成立时也不会串味
+  return `bsbt-${flow}-${hashOpenCodeSessionKey(JSON.stringify([flow, cardKey, chatKey]))}`;
+}
+
 /**
  * 宿主代理对非 OpenAI 兼容格式的支持：
  * TauriTavern 后端读取 payload.custom_api_format，按 openai_responses.rs / claude
@@ -148,10 +243,10 @@ function getHostProxyHeaders(extraHeaders = {}) {
  */
 const PLUGIN_USER_AGENT = 'BS-BioTracker (+https://github.com/Liuuuu54/st_bs_biotracker)'
 
-function buildHostProxyConfig(apiBase, settings) {
-  const apiKey = String(settings?.apiKey || '')
-  const format = normalizeApiFormat(settings?.apiFormat)
-  const headerLines = []
+function buildHostProxyConfig(apiBase, settings, sessionId = '') {
+  const apiKey = String(settings?.apiKey || '');
+  const format = normalizeApiFormat(settings?.apiFormat);
+  const headerLines = [];
   if (apiKey) {
     if (format === API_FORMATS.GEMINI_INTERACTIONS) {
       // Google AI 认 x-goog-api-key；Authorization: Bearer 会被当成 OAuth 而 401
@@ -173,6 +268,11 @@ function buildHostProxyConfig(apiBase, settings) {
   // additional headers 最后应用，注入这里会把产品 UA 顶掉，故 TT 跳过。
   if (!hostSupportsFormatAwareProxy()) {
     headerLines.push(`User-Agent: ${PLUGIN_USER_AGENT}`)
+  }
+  // 宿主代理路径走 ST/TT 后端代发上游请求，会话头只能随 custom_include_headers
+  // 进去；非 opencode 渠道 sessionId 恒为空，不会多带
+  if (isValidOpenCodeSessionId(sessionId)) {
+    headerLines.push(`${OPENCODE_SESSION_HEADER}: ${sessionId}`);
   }
   return {
     chat_completion_source: 'custom',
@@ -316,6 +416,56 @@ function createApiDeadlineError(deadlineMs) {
   error[API_DEADLINE_MARKER] = true
   return error
 }
+const API_USER_ABORT_MARKER = '__bs_biotracker_user_abort__';
+
+export function isApiUserAbortError(error) {
+  return error?.[API_USER_ABORT_MARKER] === true;
+}
+
+function createApiUserAbortError(label) {
+  const error = new Error(`${label || '请求'}已由使用者终止。`);
+  error[API_USER_ABORT_MARKER] = true;
+  return error;
+}
+
+// ---- 进行中的请求 ----
+// 每轮 callOpenAICompatible 都登记自己的总时限控制器，让使用者可以随时终止：
+// 模型陷入超长思维链或网络卡住时，不必等到总时限才解禁。
+const activeApiRequests = new Map();
+let apiRequestSeq = 0;
+
+export const API_FLOW_LABELS = Object.freeze({
+  tracker: '追踪',
+  registry: '注册',
+  breeding: '繁育推演',
+  wardrobe: '备装',
+  outfit: '起始着衣',
+  diary: '日记',
+  skill: '技能推演',
+});
+
+/** 目前进行中的请求（不含控制器本身） */
+export function getActiveApiRequests() {
+  return [...activeApiRequests.values()].map(({ id, flow, label, startedAt }) => ({ id, flow, label, startedAt }));
+}
+
+/**
+ * 终止进行中的请求。flow 省略时全部终止。回传终止了几轮。
+ * 终止会中止正在飞的 fetch 并停止后续重试，发起方收到 isApiUserAbortError 的错误。
+ */
+export function abortActiveApiRequests({ flow = null } = {}) {
+  let count = 0;
+  for (const entry of activeApiRequests.values()) {
+    if (flow && entry.flow !== flow) continue;
+    if (entry.userAborted) continue;
+    entry.userAborted = true;
+    try {
+      entry.controller.abort();
+    } catch {}
+    count += 1;
+  }
+  return count;
+}
 /**
  * 一整轮分析（含全部重试与各自的 JSON 纠错子请求）的总时限。
  *
@@ -367,9 +517,11 @@ async function fetchText(url, options = {}) {
     }
   }
   try {
-    const response = await fetch(url, fetchOptions)
-    const responseText = await response.text().catch(error => `[failed to read response text: ${String(error?.message || error)}]`)
-    return { response, responseText }
+    const response = await fetch(url, markOwnRequest(fetchOptions));
+    const responseText = await response.text().catch((error) => (
+      `[failed to read response text: ${String(error?.message || error)}]`
+    ));
+    return { response, responseText };
   } catch (error) {
     // 总时限优先：它触发时单次超时可能也顺带 abort，但要归因到「整轮超时」
     if (externalAborted) throw createApiDeadlineError(Number(deadlineMs) || 0)
@@ -401,13 +553,15 @@ async function requestHostProxyChatCompletion(apiBase, settings, requestBody, ru
     presence_penalty: requestBody.presence_penalty,
     max_tokens: requestBody.max_tokens,
     seed: requestBody.seed,
+    reasoning_effort: requestBody.reasoning_effort,
+    // 非 compat 格式交给宿主后端按 custom_api_format 翻译；response_format 不在其中
     ...(formatAware ? { custom_api_format: apiFormat } : { response_format: requestBody.response_format }),
     stream: false,
-    ...buildHostProxyConfig(apiBase, settings),
-  }
-  Object.keys(proxyBody).forEach(key => {
-    if (proxyBody[key] === undefined) delete proxyBody[key]
-  })
+    ...buildHostProxyConfig(apiBase, settings, runContext.sessionId || ''),
+  };
+  Object.keys(proxyBody).forEach((key) => {
+    if (proxyBody[key] === undefined) delete proxyBody[key];
+  });
   return fetchText('/api/backends/chat-completions/generate', {
     method: 'POST',
     headers: getHostProxyHeaders(),
@@ -600,6 +754,49 @@ function filterRecentMessagesForMainflowCopy(recentMessages, settings = null) {
 function resolveMainflowCopyMessageLimit(settings) {
   return Math.max(2, Number(settings?.contextSize) || 12)
 }
+export const DEFAULT_MAINFLOW_COPY_CHAR_LIMIT = 400000;
+
+/** 主线复制的字数上限；0 表示不限，其余至少 1 万字 */
+export function resolveMainflowCopyCharLimit(settings) {
+  const raw = settings?.mainflowCopyCharLimit;
+  if (raw === undefined || raw === null || raw === '') return DEFAULT_MAINFLOW_COPY_CHAR_LIMIT;
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return DEFAULT_MAINFLOW_COPY_CHAR_LIMIT;
+  return value <= 0 ? 0 : Math.max(10000, Math.floor(value));
+}
+
+/**
+ * 把复制来的主线内容压在字数上限内。主线的上下文上限可能远大于追踪 API 的上限
+ * （例如主线设 200 万、追踪端 104.8 万），而 strict 后处理会把整份系统内容合并成一则，
+ * 只限则数挡不住。先由旧到新丢掉复制来的聊天讯息，仍超过才从系统讯息尾端截断。
+ */
+export function capMainflowCopy(chatMessages, systemMessages, limit) {
+  const length = (list) => list.reduce((sum, message) => sum + String(message?.content || '').length, 0);
+  const chat = [...chatMessages];
+  if (!limit) return { chat, system: [...systemMessages], droppedMessages: 0, truncatedChars: 0 };
+  let droppedMessages = 0;
+  while (chat.length > 0 && length(chat) + length(systemMessages) > limit) {
+    chat.shift();
+    droppedMessages += 1;
+  }
+  let remaining = limit - length(chat);
+  let truncatedChars = 0;
+  const system = [];
+  for (const message of systemMessages) {
+    const content = String(message?.content || '');
+    if (content.length <= remaining) {
+      system.push(message);
+      remaining -= content.length;
+      continue;
+    }
+    const kept = Math.max(0, remaining);
+    truncatedChars += content.length - kept;
+    if (kept > 0) system.push({ ...message, content: `${content.slice(0, kept)}\n…（主线复制超过字数上限，已截断 ${content.length - kept} 字）` });
+    remaining = 0;
+  }
+  return { chat, system, droppedMessages, truncatedChars };
+}
+
 export function buildPayloadWithMainflowCopy(payload, settings = null) {
   if (!payload || typeof payload !== 'object') {
     return { payload, hasMainflowCopy: false, messageCount: 0 }
@@ -608,14 +805,27 @@ export function buildPayloadWithMainflowCopy(payload, settings = null) {
   if (!snapshot || typeof snapshot !== 'object') {
     return { payload, hasMainflowCopy: false, messageCount: 0 }
   }
-  const normalizedMessages = normalizeMainflowSnapshotMessages(snapshot.messages)
-  const copiedMessages = normalizedMessages.filter(message => message.role !== 'system')
-  const copiedSystemMessages = normalizedMessages.filter(message => message.role === 'system')
-  const filteredMessages = INCLUDE_MAINFLOW_CHAT_MESSAGES ? copiedMessages.filter(message => shouldKeepMainflowChatMessage(message.content)) : []
-  const filteredSystemMessages = copiedSystemMessages.filter(message => shouldKeepMainflowSystemMessage(message.content))
-  const trimmedMessages = filteredMessages.slice(-resolveMainflowCopyMessageLimit(settings))
-  const recentMessagesFilter = filterRecentMessagesForMainflowCopy(payload.recent_messages, settings)
-  const { mainflow_context_snapshot: _discarded, ...restPayload } = payload
+  const normalizedMessages = normalizeMainflowSnapshotMessages(snapshot.messages);
+  const copiedMessages = normalizedMessages.filter((message) => message.role !== 'system');
+  const copiedSystemMessages = normalizedMessages.filter((message) => message.role === 'system');
+  const filteredMessages = INCLUDE_MAINFLOW_CHAT_MESSAGES
+    ? copiedMessages.filter((message) => shouldKeepMainflowChatMessage(message.content))
+    : [];
+  const charLimit = resolveMainflowCopyCharLimit(settings);
+  const capped = capMainflowCopy(
+    filteredMessages.slice(-resolveMainflowCopyMessageLimit(settings)),
+    copiedSystemMessages.filter((message) => shouldKeepMainflowSystemMessage(message.content)),
+    charLimit,
+  );
+  const filteredSystemMessages = capped.system;
+  const trimmedMessages = capped.chat;
+  if (capped.droppedMessages > 0 || capped.truncatedChars > 0) {
+    const notice = `[BS BioTracker] 主线复制超过字数上限（${charLimit} 字），已略去 ${capped.droppedMessages} 则较旧的讯息、截断 ${capped.truncatedChars} 字；可在系统页调整上限`;
+    console.warn(notice);
+    globalThis.toastr?.warning?.(notice);
+  }
+  const recentMessagesFilter = filterRecentMessagesForMainflowCopy(payload.recent_messages, settings);
+  const { mainflow_context_snapshot: _discarded, ...restPayload } = payload;
   if (trimmedMessages.length === 0 && filteredSystemMessages.length === 0) {
     return {
       payload:
@@ -655,6 +865,9 @@ export function buildPayloadWithMainflowCopy(payload, settings = null) {
         retained_system_message_count: filteredSystemMessages.length,
         stripped_messages: Math.max(0, copiedMessages.length - filteredMessages.length),
         stripped_system_messages: Math.max(0, copiedSystemMessages.length - filteredSystemMessages.length),
+        copy_char_limit: charLimit || null,
+        dropped_for_char_limit: capped.droppedMessages,
+        truncated_chars_for_char_limit: capped.truncatedChars,
         original_recent_message_count: recentMessagesFilter.originalCount,
         filtered_recent_message_count: recentMessagesFilter.filteredCount,
         retained_recent_message_count: recentMessagesFilter.retainedCount,
@@ -688,20 +901,31 @@ function resolvePayloadValueWithStMacros(value, stCtx) {
   }
   return value
 }
-async function buildResolvedWorldInfo(stCtx) {
-  const chat = getHostChat(stCtx)
-  const maxContext = Number(stCtx?.maxContext || getHostChatCompletionSettings(stCtx)?.openai_max_context || 0)
+async function buildResolvedWorldInfo(stCtx, settings = null) {
   try {
-    const result = await getHostWorldInfoPrompt(stCtx, chat, maxContext > 0 ? maxContext : undefined, true)
-    if (!result) return null
-    const before = sanitizeTransportString(result?.worldInfoBefore || '').trim()
-    const after = sanitizeTransportString(result?.worldInfoAfter || '').trim()
-    const combined = [before, after].filter(Boolean).join('\n').trim()
-    if (!before && !after && !combined) return null
-    return { before, after, combined }
+    const resolved = await resolveHostWorldInfo(stCtx, settings);
+    if (resolved) {
+      const before = sanitizeTransportString(resolved.before).trim();
+      const after = sanitizeTransportString(resolved.after).trim();
+      const combined = [before, after].filter(Boolean).join('\n').trim();
+      if (combined) return { before, after, combined };
+    }
   } catch (error) {
-    console.warn('[BS BioTracker] failed to resolve world info prompt', error)
-    return null
+    console.warn('[BS BioTracker] host world-info resolver failed, trying legacy host API', error);
+  }
+  const chat = getHostChat(stCtx);
+  const maxContext = Number(stCtx?.maxContext || getHostChatCompletionSettings(stCtx)?.openai_max_context || 0);
+  try {
+    const result = await getHostWorldInfoPrompt(stCtx, chat, maxContext > 0 ? maxContext : undefined, true);
+    if (!result) return null;
+    const before = sanitizeTransportString(result?.worldInfoBefore || '').trim();
+    const after = sanitizeTransportString(result?.worldInfoAfter || '').trim();
+    const combined = [before, after].filter(Boolean).join('\n').trim();
+    if (!combined) return null;
+    return { before, after, combined };
+  } catch (error) {
+    console.warn('[BS BioTracker] failed to resolve world info prompt', error);
+    return null;
   }
 }
 async function buildResolvedAsyncPayload(payload, stCtx, settings = null) {
@@ -709,11 +933,10 @@ async function buildResolvedAsyncPayload(payload, stCtx, settings = null) {
   if (resolvedWithMacros?.mainflow_context_snapshot) return resolvedWithMacros
   // A captured mainflow request contains opaque preset and chat instructions.
   // It is only a runtime signal and must never be forwarded to async analysis.
-  const { mainflow_context_snapshot: _discarded, ...resolvedPayload } = resolvedWithMacros
-  if (!settings?.trackerWorldbookMode) return resolvedPayload
-  if (settings?.trackerWorldbookMode !== 'mainflow') return resolvedPayload
-  const resolvedWorldInfo = await buildResolvedWorldInfo(stCtx)
-  if (!resolvedWorldInfo) return resolvedPayload
+  const { mainflow_context_snapshot: _discarded, ...resolvedPayload } = resolvedWithMacros;
+  if (!settings || normalizeWorldbookMode(settings.trackerWorldbookMode) !== 'mainflow') return resolvedPayload;
+  const resolvedWorldInfo = await buildResolvedWorldInfo(stCtx, settings);
+  if (!resolvedWorldInfo) return resolvedPayload;
   return {
     ...resolvedPayload,
     character_worldbook: null,
@@ -756,6 +979,42 @@ async function getResolvedPreset(settings) {
     console.warn('[BS BioTracker] failed to resolve ST preset', error)
     return null
   }
+}
+/**
+ * 思考强度请求字段：minimal/low/medium/high/xhigh/ultra/max 原样透传；
+ * 'auto'（默认）与非法值省略该参数、由服务端自定——即插件此前的原始行为。
+ * 宿主代理路径（TT/ST）由服务端按 custom_api_format 翻译，直连 compat 原样发送；
+ * 直连原生格式里只有 Responses 有 effort 概念（reasoning.effort），Claude 的
+ * thinking 与 Gemini 的 thinkingConfig 要的是 token 数而非档位，无从忠实映射，
+ * 故不发送（宿主代理路径仍由服务端翻译，不受影响）。
+ */
+function resolveReasoningEffortField(settings) {
+  const raw = normalizeReasoningEffort(settings?.reasoningEffort);
+  if (raw === 'auto') return {};
+  return { reasoning_effort: raw };
+}
+
+/**
+ * 温度三态请求字段：
+ * - omit：不返回字段，调用方收尾再删（连预设带入的 temperature 一并清除）；
+ * - manual：返回强制覆盖字段，压在预设之后、每次都用用户的；
+ * - legacy：返回上游硬编码（主 0.2／重试 0.1），预设可覆盖。
+ */
+function resolveBaseTemperatureField(settings, fallback) {
+  if (normalizeTemperatureMode(settings?.temperatureMode) === 'omit') return {};
+  return { temperature: fallback };
+}
+
+function resolveManualTemperatureField(settings) {
+  if (normalizeTemperatureMode(settings?.temperatureMode) !== 'manual') return {};
+  const userTemperature = resolveUserTemperature(settings);
+  if (userTemperature === null) return {};
+  return { temperature: userTemperature };
+}
+
+function stripTemperatureField(settings, body) {
+  if (normalizeTemperatureMode(settings?.temperatureMode) === 'omit') delete body.temperature;
+  return body;
 }
 function buildPresetSamplingBodyFromPreset(preset) {
   const other = preset?.other && typeof preset.other === 'object' ? preset.other : {}
@@ -919,10 +1178,17 @@ function buildDirectPayload(format, requestBody) {
       temperature: requestBody.temperature,
       top_p: requestBody.top_p,
       seed: requestBody.seed,
+    };
+    if (requestBody.max_tokens) payload.max_output_tokens = requestBody.max_tokens;
+    if (requestBody.max_completion_tokens) payload.max_output_tokens = requestBody.max_completion_tokens;
+    // 直连 Responses 原生端点：档位原样进 reasoning.effort（服务端校验）；
+    // auto 时该字段本就不存在，直接省略
+    if (typeof requestBody.reasoning_effort === 'string' && requestBody.reasoning_effort) {
+      payload.reasoning = { effort: requestBody.reasoning_effort };
     }
-    if (requestBody.max_tokens) payload.max_output_tokens = requestBody.max_tokens
-    if (requestBody.max_completion_tokens) payload.max_output_tokens = requestBody.max_completion_tokens
-    if (requestBody.response_format?.type === 'json_object') payload.text = { format: { type: 'json_object' } }
+    if (requestBody.response_format?.type === 'json_object') {
+      payload.text = { format: { type: 'json_object' } };
+    }
     return payload
   }
   if (format === API_FORMATS.CLAUDE_MESSAGES) return buildClaudeMessagesBody(requestBody)
@@ -954,9 +1220,12 @@ async function requestChatCompletion(apiBase, settings, body, runContext = {}) {
     const previousAsyncFlag = globalThis.__bs_biotracker_async_request__
     globalThis.__bs_biotracker_async_request__ = true
     const format = normalizeApiFormat(settings?.apiFormat)
+    // 会话头只认 opencode endpoint，其他渠道为空、直连与代理路径都不会多带
+    const sessionId = runContext.sessionId || ''
     const upstreamUrl = getApiUrlForFormat(apiBase, format)
     const isCompat = format === API_FORMATS.OPENAI_COMPAT
     const formatAwareProxy = !isCompat && hostSupportsFormatAwareProxy()
+    // ST/Luker 的 /proxy/<url> 透传代理：服务端原样转发绕开 CORS（需 config.yaml 开启 enableCorsProxy，未开启返回 404）
     const transparentProxyUrl = !isCompat && !formatAwareProxy && isBrowserRuntime() && isCrossOriginUrl(upstreamUrl)
       ? `/proxy/${upstreamUrl}`
       : null
@@ -994,13 +1263,13 @@ async function requestChatCompletion(apiBase, settings, body, runContext = {}) {
         }
         if (proxyError || (!response.ok && shouldFallbackFromHostProxy(responseText, response.status))) {
           transport = proxyError ? 'direct-after-proxy-error' : `direct-after-proxy-${response.status}`
-          url = upstreamUrl
+          url = upstreamUrl;
           if (!proxyError && (response.status === 401 || response.status === 403)) {
             disableHostProxyForSession(response.status, responseText)
           }
           ({ response, responseText } = await fetchText(upstreamUrl, {
             method: 'POST',
-            headers: getAuthHeaders(settings),
+            headers: getAuthHeaders(settings, sessionId),
             body: directRequestText,
             timeoutMs: resolveApiTimeoutMs(settings),
             externalSignal: runContext.signal || null,
@@ -1012,7 +1281,7 @@ async function requestChatCompletion(apiBase, settings, body, runContext = {}) {
         try {
           ({ response, responseText } = await fetchText(transparentProxyUrl, {
             method: 'POST',
-            headers: getHostProxyHeaders(getAuthHeaders(settings)),
+            headers: getHostProxyHeaders(getAuthHeaders(settings, sessionId)),
             body: requestText,
             timeoutMs: resolveApiTimeoutMs(settings),
             externalSignal: runContext.signal || null,
@@ -1025,10 +1294,10 @@ async function requestChatCompletion(apiBase, settings, body, runContext = {}) {
         }
         if (proxyError || (!response.ok && shouldFallbackFromHostProxy(responseText, response.status))) {
           transport = proxyError ? 'direct-after-proxy-error' : `direct-after-proxy-${response.status}`
-          url = upstreamUrl
+          url = upstreamUrl;
           ({ response, responseText } = await fetchText(upstreamUrl, {
             method: 'POST',
-            headers: getAuthHeaders(settings),
+            headers: getAuthHeaders(settings, sessionId),
             body: directRequestText,
             timeoutMs: resolveApiTimeoutMs(settings),
             externalSignal: runContext.signal || null,
@@ -1038,7 +1307,7 @@ async function requestChatCompletion(apiBase, settings, body, runContext = {}) {
       } else {
         ({ response, responseText } = await fetchText(upstreamUrl, {
           method: 'POST',
-          headers: getAuthHeaders(settings),
+          headers: getAuthHeaders(settings, sessionId),
           body: requestText,
           timeoutMs: resolveApiTimeoutMs(settings),
           externalSignal: runContext.signal || null,
@@ -1083,7 +1352,7 @@ async function requestChatCompletion(apiBase, settings, body, runContext = {}) {
   const isNonCompatFormat = isResponses || isClaude || isGemini
 
   if (!response.ok && response.status === 400 && body.response_format && !isNonCompatFormat) {
-    const fallbackBody = {
+    const fallbackBody = stripTemperatureField(settings, {
       model: body.model,
       temperature: body.temperature,
       top_p: body.top_p,
@@ -1092,11 +1361,11 @@ async function requestChatCompletion(apiBase, settings, body, runContext = {}) {
       max_tokens: body.max_tokens,
       seed: body.seed,
       messages: body.messages,
-    }
-    result = await postBody(fallbackBody, 'without_response_format')
-    response = result.response
-    responseText = result.responseText
-    errorText = response.ok ? '' : responseText
+    });
+    result = await postBody(fallbackBody, 'without_response_format');
+    response = result.response;
+    responseText = result.responseText;
+    errorText = response.ok ? '' : responseText;
   }
 
   const invalidArgument = response.status === 400 && /invalid argument|badRequest/i.test(errorText)
@@ -1234,18 +1503,18 @@ async function buildPresetEnvelope(settings, baseSystemPrompt, payloadText) {
     return null
   }
 }
-export async function callOpenAICompatible(settings, payload, systemPrompt = DEFAULT_SYSTEM_PROMPT) {
-  const apiBase = getApiBase(settings)
-  const model = String(settings.model || '').trim()
-  const stCtx = getSillyTavernContext()
-  const resolvedPayload = await buildResolvedAsyncPayload(payload, stCtx, settings)
-  const mainflowCopy = buildPayloadWithMainflowCopy(resolvedPayload, settings)
-  const safePayload = sanitizeTransportValue(mainflowCopy.payload)
+export async function callOpenAICompatible(settings, payload, systemPrompt = DEFAULT_SYSTEM_PROMPT, options = {}) {
+  const apiBase = getApiBase(settings);
+  const model = String(settings.model || '').trim();
+  const stCtx = getSillyTavernContext();
+  const resolvedPayload = await buildResolvedAsyncPayload(payload, stCtx, settings);
+  const mainflowCopy = buildPayloadWithMainflowCopy(resolvedPayload, settings);
+  const safePayload = sanitizeTransportValue(mainflowCopy.payload);
   //=========禁止记忆传入user==========
   delete safePayload.memory_context
   delete safePayload.memory_source
   //=========禁止记忆传入user==========
-  const safeSystemPrompt = sanitizeTransportString(resolveWithStMacros(systemPrompt || DEFAULT_SYSTEM_PROMPT, stCtx))
+  const safeSystemPrompt = sanitizeTransportString(resolveWithStMacros(systemPrompt || DEFAULT_SYSTEM_PROMPT, stCtx));
   const baseMessages = [
     { role: 'system', content: safeSystemPrompt },
     { role: 'user', content: JSON.stringify(safePayload) },
@@ -1259,7 +1528,7 @@ export async function callOpenAICompatible(settings, payload, systemPrompt = DEF
   const stPresetSampling = presetEnvelope?.sampling || {}
   const effectivePresetName = presetEnvelope?.presetName || ''
   // 格式化输出(v4兼容)：response_format.type = json_object（无 json_schema），可在设置关闭。
-  // DeepSeek 系额外注入输出结构指令——但只在追踪流程注入：registry/日记/备装/技能/
+  // DeepSeek 系额外注入输出结构指令——但只在追踪流程注入：registry/日记/着衣/备装/技能/
   // 繁育推演各自声明了不同的 JSON 结构，注入 tool_calls 指令会压过它们的 schema。
   const useFormattedOutputV4 = shouldUseResponseFormat(settings, model)
   const isTrackerFlow = !safePayload?.target_character
@@ -1270,13 +1539,15 @@ export async function callOpenAICompatible(settings, payload, systemPrompt = DEF
       ...effectiveMessages.slice(1),
     ]
   }
-  const body = {
+  const body = stripTemperatureField(settings, {
     model,
-    temperature: 0.2,
+    ...resolveBaseTemperatureField(settings, 0.2),
     ...stPresetSampling,
+    ...resolveManualTemperatureField(settings),
+    ...resolveReasoningEffortField(settings),
     messages: effectiveMessages,
     ...(useFormattedOutputV4 ? { response_format: { type: 'json_object' } } : {}),
-  }
+  });
   recordEffectiveRequestDebug(
     `${safePayload?.target_character ? 'registry' : 'tracker'}${mainflowCopy.hasMainflowCopy ? '-mainflow-copy' : safePayload?.resolved_worldbook_prompt ? '-mainflow-worldinfo' : ''}${useFormattedOutputV4 ? '' : '-no-response-format'}${injectV4Instruction ? '-v4-instruction' : ''}`,
     effectivePresetName,
@@ -1297,37 +1568,55 @@ export async function callOpenAICompatible(settings, payload, systemPrompt = DEF
       } catch {}
     }, deadlineMs)
   }
-  const runContext = { signal: overallController?.signal || null, deadlineMs }
+  const flow = String(options?.flow || (safePayload?.target_character ? 'registry' : 'tracker'));
+  const requestEntry = overallController
+    ? { id: ++apiRequestSeq, flow, label: API_FLOW_LABELS[flow] || callLabel, startedAt: Date.now(), controller: overallController, userAborted: false }
+    : null;
+  if (requestEntry) activeApiRequests.set(requestEntry.id, requestEntry);
+  const runContext = {
+    signal: overallController?.signal || null,
+    deadlineMs,
+    // opencode 会话 ID 按 flow×卡×聊天推导：同 flow 同卡同聊天多轮复用同一会话，
+    // prompt 前缀缓存不被其他 flow/卡/聊天冲掉；纠错子请求同轮沿用同一会话
+    sessionId: buildOpenCodeSessionId(apiBase, safePayload, options?.flow),
+  };
+
   try {
-    return await withGlobalApiRetries(
-      async globalAttempt => {
-        const data = await requestChatCompletion(apiBase, settings, body, runContext)
-        const content = data?.choices?.[0]?.message?.content || ''
-        let parsed = extractJson(content)
-        if (parsed && typeof parsed === 'object') return parsed
-        // 同一轮全局尝试内：先做一次「请只输出 JSON」纠错请求
-        const retryBody = {
-          model,
-          temperature: 0.1,
-          ...stPresetSampling,
-          messages: [
-            ...effectiveMessages,
-            { role: 'assistant', content: String(content || '') },
-            { role: 'user', content: buildJsonRetryInstruction() },
-          ],
-          ...(useFormattedOutputV4 ? { response_format: { type: 'json_object' } } : {}),
-        }
-        const retryData = await requestChatCompletion(apiBase, settings, retryBody, runContext)
-        const retryContent = retryData?.choices?.[0]?.message?.content || ''
-        parsed = extractJson(retryContent)
-        if (parsed && typeof parsed === 'object') return parsed
-        throw new Error(
-          `模型没有返回可解析的 JSON（全局尝试 ${globalAttempt + 1}/${GLOBAL_API_MAX_RETRIES + 1}）。原始回覆：${summarizeModelText(retryContent || content)}`,
-        )
-      },
-      { label: callLabel, overallSignal: overallController?.signal || null, deadlineMs },
-    )
+    return await withGlobalApiRetries(async (globalAttempt) => {
+      const data = await requestChatCompletion(apiBase, settings, body, runContext);
+      const content = data?.choices?.[0]?.message?.content || '';
+      let parsed = extractJson(content);
+      if (parsed && typeof parsed === 'object') return parsed;
+
+      // 同一轮全局尝试内：先做一次「请只输出 JSON」纠错请求
+      const retryBody = stripTemperatureField(settings, {
+        model,
+        ...resolveBaseTemperatureField(settings, 0.1),
+        ...stPresetSampling,
+        ...resolveManualTemperatureField(settings),
+        ...resolveReasoningEffortField(settings),
+        messages: [
+          ...effectiveMessages,
+          { role: 'assistant', content: String(content || '') },
+          { role: 'user', content: buildJsonRetryInstruction() },
+        ],
+        ...(useFormattedOutputV4 ? { response_format: { type: 'json_object' } } : {}),
+      });
+      const retryData = await requestChatCompletion(apiBase, settings, retryBody, runContext);
+      const retryContent = retryData?.choices?.[0]?.message?.content || '';
+      parsed = extractJson(retryContent);
+      if (parsed && typeof parsed === 'object') return parsed;
+
+      throw new Error(
+        `模型没有返回可解析的 JSON（全局尝试 ${globalAttempt + 1}/${GLOBAL_API_MAX_RETRIES + 1}）。原始回覆：${summarizeModelText(retryContent || content)}`,
+      );
+    }, { label: callLabel, overallSignal: overallController?.signal || null, deadlineMs });
+  } catch (error) {
+    // 使用者按下终止时，底层会以「总时限」的形式中断；这里改回正确的原因
+    if (requestEntry?.userAborted) throw createApiUserAbortError(requestEntry.label);
+    throw error;
   } finally {
-    if (overallTimer) clearTimeout(overallTimer)
+    if (overallTimer) clearTimeout(overallTimer);
+    if (requestEntry) activeApiRequests.delete(requestEntry.id);
   }
 }

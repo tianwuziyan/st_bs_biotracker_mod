@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import * as state from '../scripts/state.js';
+import { deriveFetusTags } from '../scripts/fetus_tags.js';
 import { getBaseRaceName, getRaceComponents, getRaceDescriptorComponents, parseRaceDescriptor } from '../scripts/race_config.js';
 import { applyToolCall, calculateChimeraFusionProbability } from '../scripts/tools.js';
 
@@ -152,12 +153,12 @@ test('embryo race follows the provider, not the carrier', () => {
 test('decorated hybrid descriptors preserve every subtype while physiology uses each base race', () => {
   const descriptor = '[魔女]獸耳族-兔x精靈-木';
   assert.deepEqual(parseRaceDescriptor(descriptor), {
-    race: '獸耳族-兔x精靈-木',
+    race: '兽耳族-兔x精灵-木',
     derivedType: '魔女',
   });
-  assert.deepEqual(getRaceDescriptorComponents(descriptor), ['獸耳族-兔', '精靈-木']);
-  assert.deepEqual(getRaceComponents(descriptor), ['獸耳族', '精靈']);
-  assert.equal(getBaseRaceName(descriptor), '獸耳族');
+  assert.deepEqual(getRaceDescriptorComponents(descriptor), ['兽耳族-兔', '精灵-木'], '繁体写法对应到内置种族');
+  assert.deepEqual(getRaceComponents(descriptor), ['兽耳族', '精灵']);
+  assert.equal(getBaseRaceName(descriptor), '兽耳族');
 
   const chatState = state.createEmptyChatState();
   chatState.characters['孕母'] = makeHost('孕母', '人类');
@@ -173,7 +174,7 @@ test('decorated hybrid descriptors preserve every subtype while physiology uses 
   });
 
   const fetus = chatState.characters['孕母'].profile.pregnant.fetuses[0];
-  assert.equal(fetus.race, '獸耳族-兔x精靈-木', '同血统配对不可丢失任一装饰子项');
+  assert.equal(fetus.race, '兽耳族-兔x精灵-木', '同血统配对不可丢失任一装饰子项');
   assert.equal(fetus.fatherDerivedType, '魔女', 'fatherRace 无 derivedType 时仍应从卵源描述符回退');
 });
 
@@ -227,7 +228,11 @@ test('bsAddSperm reads paternal derivedType from the race descriptor, not the ma
 
   applyToolCall(chatState, {
     name: 'bsAddSperm',
-    arguments: { female: '孕母', male: '同名父亲', race: '[魔女]人类X精灵', amount: 100, ejaculatedInside: true, protected: false },
+    arguments: { female: '孕母', male: '同名父亲', race: '[魔女]人类X精灵', action: 'insert', amount: 0, ejaculatedInside: true, protected: false },
+  });
+  applyToolCall(chatState, {
+    name: 'bsAddSperm',
+    arguments: { female: '孕母', male: '同名父亲', race: '[魔女]人类X精灵', action: 'deposit', amount: 100, ejaculatedInside: true, protected: false },
   });
 
   const sperm = chatState.characters['孕母'].profile.base.sperms[0];
@@ -280,7 +285,7 @@ test('an unregistered provider can still supply the race explicitly', () => {
   assert.equal(fetuses[0].provider, '深渊母巢');
 });
 
-test('implanting is refused when the carrier is already pregnant', () => {
+test('implanting is refused after early pregnancy', () => {
   const chatState = state.createEmptyChatState();
   chatState.characters['艾拉'] = makeCharacter('艾拉', [makeFetus()]);
   chatState.characters['委托母亲'] = makeHost('委托母亲');
@@ -291,7 +296,62 @@ test('implanting is refused when the carrier is already pregnant', () => {
   });
 
   assert.equal(result.applied, false);
-  assert.match(result.message, /already completed/);
+  assert.match(result.message, /only available during early pregnancy/);
+});
+
+test('implanting during early pregnancy adds a surrogate superfetation fetus', () => {
+  const chatState = state.createEmptyChatState();
+  chatState.characters['艾拉'] = makeCharacter('艾拉', [makeFetus({ fathers: '原父' })]);
+  chatState.characters['委托母亲'] = makeHost('委托母亲', '精灵');
+  const profile = chatState.characters['艾拉'].profile;
+  profile.base.stage = '孕早期';
+  profile.pregnant.pregnantDays = 25;
+  profile.pregnant.effectivePregnantDays = 25;
+
+  const first = applyToolCall(chatState, {
+    name: 'bsImplantEmbryo',
+    arguments: { female: '艾拉', provider: '委托母亲', fathers: '委托父亲' },
+  });
+  assert.equal(first.applied, true, first.message);
+
+  const updated = chatState.characters['艾拉'].profile;
+  assert.equal(updated.pregnant.fetuses.length, 2);
+  assert.equal(updated.pregnant.fetuses[0].fathers, '原父', '原胎必须保留');
+  const added = updated.pregnant.fetuses[1];
+  assert.equal(added.provider, '委托母亲');
+  assert.equal(added.pendingImplantation, true);
+  assert.equal(added.conceivedAtDays, 25);
+  assert.ok(added.weight < 1, '晚植入胎应套用异期发育落差');
+  assert.deepEqual(deriveFetusTags(added, { carrierName: '艾拉' }), ['surrogacy', 'superfetation']);
+
+  updated.base.fertilizationDays = 2;
+  const second = applyToolCall(chatState, {
+    name: 'bsImplantEmbryo',
+    arguments: { female: '艾拉', provider: '另一卵源', fathers: '另一父亲', race: '兽人' },
+  });
+  assert.equal(second.applied, true, second.message);
+  assert.equal(chatState.characters['艾拉'].profile.base.fertilizationDays, 2, '同一等待窗口不得重置计时');
+  assert.deepEqual(
+    deriveFetusTags(chatState.characters['艾拉'].profile.pregnant.fetuses[2], { carrierName: '艾拉' }),
+    ['surrogacy', 'superfetation'],
+  );
+});
+
+test('implanting during early pregnancy is refused after the superfetation window', () => {
+  const chatState = state.createEmptyChatState();
+  chatState.characters['艾拉'] = makeCharacter('艾拉', [makeFetus()]);
+  const profile = chatState.characters['艾拉'].profile;
+  profile.base.stage = '孕早期';
+  // 视窗＝孕早期 98 天减著床约 6 天，第 94 天已关
+  profile.pregnant.pregnantDays = 94;
+  profile.pregnant.effectivePregnantDays = 94;
+
+  const result = applyToolCall(chatState, {
+    name: 'bsImplantEmbryo',
+    arguments: { female: '艾拉', provider: '委托母亲' },
+  });
+  assert.equal(result.applied, false);
+  assert.match(result.message, /window has closed/);
 });
 
 test('implanting is refused when the provider is the carrier herself', () => {
@@ -406,8 +466,8 @@ test('two early embryos can fuse across races and keep dual parents under the ca
   assert.equal(chimera.gender, '待定');
   assert.equal(chimera.fathers, '父A × 父B');
   assert.deepEqual(chimera.providerSources, ['母A', '母B']);
-  assert.match(chimera.race, /獸耳族-兔/);
-  assert.match(chimera.race, /精靈-木/);
+  assert.match(chimera.race, /兽耳族-兔/);
+  assert.match(chimera.race, /精灵-木/);
   assert.equal(chimera.chimera.sourceCount, 2);
 
   Math.random = () => 0.99;
@@ -456,22 +516,15 @@ test('a failed fusion pair is checked only once', () => {
   }
   assert.equal(chatState.characters['孕母'].profile.pregnant.fetuses.length, 2, '同一对不可在下一天重抽');
 });
-test('the rupture tool is hidden until someone can actually rupture', async () => {
+test('the fetal assist tool (rotate/lift/descend/rupture/extract) is hidden while nobody carries a fetus', async () => {
   const { getTrackerToolDefinitions } = await import('../scripts/tracker.js');
   const settings = { diaryRecentLimit: 0 };
   const names = (existing) => getTrackerToolDefinitions(settings, existing).map((tool) => tool.name);
 
-  // 平时挂着只是占用模型注意力，且执行层本来就会拒绝
-  assert.equal(names({ 艾拉: { profile: { base: { stage: '卵泡期' } } } }).includes('bsRuptureMembranes'), false);
-  assert.equal(names({ 艾拉: { profile: { base: { stage: '孕晚期' } } } }).includes('bsRuptureMembranes'), false);
-
-  for (const stage of ['产兆前驱', '第一产程', '第二产程']) {
-    assert.equal(
-      names({ 艾拉: { profile: { base: { stage } } } }).includes('bsRuptureMembranes'),
-      true,
-      `${stage} 应提供破水工具`,
-    );
-  }
+  // 平时挂着只是占用模型注意力；破水也并进了这个工具，不再有独立的 bsRuptureMembranes
+  assert.equal(names({ 艾拉: { profile: { base: { stage: '卵泡期' }, pregnant: { fetuses: [] } } } }).includes('bsAssistFetalPosition'), false);
+  assert.equal(names({ 艾拉: { profile: { base: { stage: '孕晚期' }, pregnant: { fetuses: [{ embryoId: 1 }] } } } }).includes('bsAssistFetalPosition'), true);
+  assert.equal(names({ 艾拉: { profile: { base: { stage: '第一产程' }, pregnant: { fetuses: [{ embryoId: 1 }] } } } }).includes('bsRuptureMembranes'), false);
 });
 
 test('only surrogate children are offered for manual reassignment', async () => {

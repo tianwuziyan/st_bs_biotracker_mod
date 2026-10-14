@@ -66,6 +66,7 @@ test('孕早期可以再次受精，新胚胎带 superfetation 标签且待著�
   assert.ok(late.conceivedAtDays > 0, '要记下受精当下的共用时钟');
   assert.deepEqual(deriveFetusTags(late, { carrierName: 'A' }), ['superfetation']);
   assert.equal(P(chatState).pregnant.fetuses.length, 2, '先来那胎不受影响');
+  assert.equal(P(chatState).base.sperms[0].value, 90, '受精只读取有效精液量，不得额外扣除或清空可见残留');
 });
 
 test('胎重按落后进度打折，且乘在既有的种族混血偏移之上', () => {
@@ -145,6 +146,18 @@ test('进入孕中期才揭晓，可见胎数同时增加', () => {
   assert.equal(P(chatState).pregnant.fetuses.filter(isFetusKnownToCharacter).length, 2, '揭晓后胎数才增加');
 });
 
+test('一次推进跨进孕中期时，揭晓提示与阶段提示并存', () => {
+  const chatState = one({ stage: '孕早期' }, {
+    pregnantDays: 78, effectivePregnantDays: 78, fetusesCount: 2,
+    fetuses: [fetus(), lateFetus({ conceivedAtDays: 30, revealed: undefined })],
+  });
+  step(chatState, 28);
+  assert.equal(P(chatState).base.stage, '孕中期');
+  assert.equal(lateOf(chatState).revealed, true);
+  assert.match(P(chatState).notify.firstly, /进入了孕中期/);
+  assert.match(P(chatState).notify.firstly, /另有 1 胎/, '揭晓提示不能被阶段提示盖掉');
+});
+
 test('每胎用自己的孕龄，不是共用时钟', () => {
   const chatState = one({ stage: '孕中期' }, {
     pregnantDays: 100, effectivePregnantDays: 100, fetusesCount: 2,
@@ -159,8 +172,8 @@ test('每胎用自己的孕龄，不是共用时钟', () => {
 
 test('待著床的胚胎撞上孕中期会被清掉，不会活到分娩变成孩子', () => {
   const chatState = one({ stage: '孕早期' }, {
-    pregnantDays: 80, effectivePregnantDays: 80, fetusesCount: 2,
-    fetuses: [fetus(), lateFetus({ conceivedAtDays: 80, pendingImplantation: true, revealed: undefined })],
+    pregnantDays: 94, effectivePregnantDays: 94, fetusesCount: 2,
+    fetuses: [fetus(), lateFetus({ conceivedAtDays: 94, pendingImplantation: true, revealed: undefined })],
   });
   for (let i = 0; i < 20 && P(chatState).base.stage === '孕早期'; i += 1) step(chatState);
   assert.equal(P(chatState).base.stage, '孕中期');
@@ -195,8 +208,11 @@ test('两胎一起生，异期标签跟到孩子身上', () => {
   assert.deepEqual(children.map((c) => c.fathers).sort(), ['乙', '甲']);
   const lateChild = children.find((c) => c.fathers === '乙');
   assert.deepEqual(lateChild.tags, ['superfetation'], '标签要跟到孩子身上');
-  // 不断言出生体重差：长孕期的供养赤字会把两胎都压到 0.33 地板，初始差距被抹平。
-  // 受精当下的胎重折扣由上面「胎重按落后进度打折」那条直接验证。
+  // 无人照料时两胎都会亏，但供养赤字按各自孕龄分摊、单周有上限，不会双双压到地板，
+  // 晚到那胎受精时的胎重折扣在出生时仍看得出来。
+  const firstChild = children.find((c) => c.fathers === '甲');
+  assert.ok(lateChild.birthWeightRatio < firstChild.birthWeightRatio, '晚到那胎出生时仍较小');
+  assert.ok(lateChild.birthWeightRatio > 0.33, '不会被赤字压到地板');
 });
 
 test('只有待著床胚胎时不能分娩', () => {

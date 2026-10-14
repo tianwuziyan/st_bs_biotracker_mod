@@ -1,4 +1,6 @@
-import { DEFAULT_DIARY_WRITING_PROMPT, DEFAULT_REGISTRY_DESCRIPTION_GUIDES } from './registry_config.js'
+import { normalizeExperience, normalizeCognitionRecords, normalizeReproductiveSettings } from './reproductive.js';
+import { syncCardSettings, importCardSkillSeed } from './card_settings.js';
+import { DEFAULT_DIARY_WRITING_PROMPT, DEFAULT_REGISTRY_DESCRIPTION_GUIDES } from './registry_config.js';
 import {
   buildEmptyPsychologyGroup,
   normalizePsychologyGroup,
@@ -7,12 +9,15 @@ import {
   PSY_MENS_BOOL_FIELDS,
   PSY_PREG_FIELDS,
   PSY_PREG_BOOL_FIELDS,
-} from './registry_psy_config.js'
-import { LABOR_STAGES, MENSTRUAL_STAGES, MENSTRUAL_STAGE_DAYS, PREGNANCY_STAGE_DAYS, PREGNANCY_STAGES } from './stage_config.js'
-import { normalizeNextSkillId, normalizeSkillCatalog, normalizeSkillHistory, normalizeSkillList, normalizeTalentList } from './skill_config.js'
+} from './registry_psy_config.js';
+import { GESTATION_SPEED_MAX, GESTATION_SPEED_MIN, LABOR_STAGES, MENSTRUAL_STAGES, MENSTRUAL_STAGE_DAYS, POSTTERM_START_DAYS, PREGNANCY_STAGE_DAYS, PREGNANCY_STAGES } from './stage_config.js';
+import { normalizeNextSkillId, normalizeSkillCatalog, normalizeSkillHistory, normalizeSkillList, normalizeTalentList } from './skill_config.js';
+import { CHAT_STATE_SCHEMA_VERSION, getChatStateSchemaVersion, migrateCharacters, normalizeCharacterBloodlines } from './state_migration.js';
+import { announceSavedRevisions, claimChatRevision, clearHostSettingsPendingUpTo, markHostSettingsPending, queueRevisionAnnouncement, readLatestChatRevision } from './save_sync.js';
 import {
   createDefaultWardrobeItem,
-  normalizeTemporaryOutfitItems,
+  DEFAULT_WEAR_STATE,
+  normalizeTransientOutfitItems,
   normalizeWardrobeItem,
   normalizeWardrobeItemId,
   sanitizeWearState,
@@ -25,12 +30,17 @@ import {
   getHostContext,
   getHostExtensionSettings,
   getHostKind,
+  isHostChatStateConfirmed,
+  isPlaceholderHostChatId,
+  PLACEHOLDER_CHAT_KEY_PATTERN,
   getHostWorldBook,
   hasAbsoluteHostChatView,
   loadHostWorldInfo,
   loadHostChatState,
   resolveHostChatId,
   saveHostSettings,
+  saveHostSettingsImmediately,
+  flushHostChatStateSave,
   scheduleHostChatStateSave,
 } from './host.js'
 import { normalizeMemorySource } from './memory_sources.js'
@@ -67,22 +77,20 @@ export const THEME_CONFIG = {
   iphone: {},
 }
 export const DEFAULT_WARDROBE_PREP_PROMPT = [
-  '请根据角色卡、世界书、最近对话、已注册状态与当前服装描述，为指定角色准备衣柜 JSON。',
-  '默认生成 3 件 main 主件、3 件 accessory 配件；若用户在本提示中指定数量、风格、场景或禁忌，请优先遵守。',
-  '主件应覆盖角色常用日常服、较正式/外出服、睡衣或居家服等；配件可包含外套、托腹带、鞋履、披肩、制服配件、贴身内衣等。',
-  'note 只写衣物稳定外观与来源：颜色、材质、版型、长短、固定开口、图案、制服/病服/借装来源等。皮肤暴露、开衩、透肤、深领等稳定外观写在 note。禁止写当前穿着反应、角色感受、近期身体变化、怀孕/胀痛/压胸/勒红/变紧/显怀等动态状态；这些由四维、pregFit 与当轮叙事推导。',
-  '每件衣物字段必须为 id/name/note/slot/masking/support/capacity/convenience；主件可附 parts 数组列出组成部件名（如 ["白衬衫","牛仔裤"]，连身装可省略）；配件可附 layer（inner=贴身内衣等穿在主件之下，outer=外搭，默认 outer），通常应生成 1-2 件 layer=inner 的贴身衣物配件。',
-  '可独立穿脱的外层（毛衣、开衫、外套、罩衫、披肩等）不要并入 main 或写进 parts，应拆成 layer=outer 的配件；main 只保留脱掉外层后仍成立的基础层。',
-  'slot 只能是 main 或 accessory；main 是主件，只能穿一件；accessory 可叠加，但只是补正。',
-  '四维均为 -10 到 10；主件通常使用 0 到 10。配件单项只能 -3 到 3，通常只影响 1-2 个维度，其他维度必须填 0。旧的 contour/unsupported 若出现在资料中，会被视为 masking/support 的反向旧字段。',
-  'masking=掩盖身体曲线、孕肚、胸腹变化的程度；support=对胸、腹、腰、重心的承托程度，高表示托得住但可能偏束，低表示松散；capacity=容许体型变化的程度；convenience=行动、穿脱、如厕、哺乳或排解需求的方便程度。',
-  'id 必须使用整数；0 是系统保留默认主件，表示全裸，不要放入 wardrobe.items。长期衣柜 id 从 1 开始递增。',
-  'outfit.mainItemId 请选择一件最符合当前叙事/注册描述的主件；outfit.accessoryItemIds 选择当前已穿戴配件，未知则空数组。',
+  '请根据角色卡、世界书、最近对话与已注册状态，为指定角色补充少量可重复使用的衣柜项目 JSON。不要重建整个衣柜。',
+  'main 是一套完整的基础衣着，同时只有一套；可用 parts 列出上衣、下装等组成。accessory 是可叠加配件。',
+  'main 使用 fitProfile：masking 只能为 very_low/low/medium/high，support 只能为 none/normal/strong，capacity 只能为 tight/fitted/stretch/loose，convenience 只能为 inconvenient/normal/convenient。',
+  'accessory 使用 category：underwear/outerwear/footwear/headwear/ornament/support/other；effects 最多两项，可选 masking/support/capacity/convenience 后缀 _up 或 _down。',
+  'note 只写稳定外观与来源，不写当前穿着反应、怀孕变化或感受。返回 items 数组，不需要手填数值分数。',
+  '若用户指定数量、风格、场景或禁忌，优先遵守；衣柜项目应覆盖日常、正式/外出、睡衣或居家等常用场景。',
+  '可独立穿脱的外层应作为 accessory 记录，不要塞进 main 的 parts；main 保留脱掉外层后仍成立的基础层。',
+  'slot 只能是 main 或 accessory；id 必须是整数，0 是系统保留的全裸主件，不要放入新增衣柜项目。',
+  'outfit.mainItemId 选择最符合当前叙事/注册描述的主件；outfit.accessoryItemIds 选择当前已穿戴配件，未知则空数组。',
   'temporaryItems 只用于病服、借装、旅馆睡衣等临时衣物；备装长期衣柜时通常输出空数组。',
-].join('\n')
+].join('\n');
 export const DEFAULT_SYSTEM_PROMPT = [
   '你是 AIRP 角色生理状态追踪器的工具调度器。',
-  '工具参数中的 female 指「孕育者」——被追踪的承载方，不限定性别；扶她、孕夫、雄性孕育系（如海龙人）同样使用该字段。',
+  '工具参数中的 female 指「孕育者」——被追踪的承载方，不限定性别；扶她、孕夫、雄性孕育系（如海马族）同样使用该字段。',
   '你要根据角色卡、最近对话、已有状态，决定这次应调用哪些工具更新状态。',
   '只输出 JSON，不要输出额外解释。',
   'JSON 结构必须是：',
@@ -102,14 +110,15 @@ export const DEFAULT_SYSTEM_PROMPT = [
   '没有足够依据时，tool_calls 返回空数组。',
   '如果对话明确发生了时间流逝，优先调用 bsPassedTime。',
   '如果只是活力、情压、性欲、宫压波动，使用 bsUpdateCharacterStatus。',
-  '如果只是心理数值变化，使用 bsUpdatePsychology；其数值参数一律表示变化量(delta)而不是目标值，例如当前为 78 时传 2 会变成 80。应优先做单一心理项的小幅调整，单次建议只动一个字段，幅度尽量控制在 ±1 到 ±3，±5 已属于偏大变化。每名角色在每个新小时内仅允许一次成功的 bsUpdatePsychology 变化，重复调用会被跳过。如果只是经验或关系记录变化，使用 bsUpdateExperience。',
+  '如果只是心理数值变化，使用 bsUpdatePsychology；其数值参数一律表示变化量(delta)而不是目标值，例如当前为 78 时传 2 会变成 80。应优先做单一心理项的小幅调整，单次建议只动一个字段，幅度尽量控制在 ±1 到 ±3，±5 已属于偏大变化。每名角色在每个新小时内仅允许一次成功的 bsUpdatePsychology 变化，重复调用会被跳过。如果只是经验或关系记录变化，使用 bsRecordExperience（必填 female、action、time；认知用 cognition，关系用 date/breakup/marry/divorce，孩子用 child）。',
   '如果只是描述文字变化，使用 bsSetDescription。',
   '剧情中出现穿上、脱下、更衣、借穿、被脱除、淋湿更换、洗浴后重新着装等衣着变化时，必须用 bsChangeOutfit 同步当前穿着；只更新衣着描述文字而不换装是错误的。角色获得新长期衣物用 bsAddWardrobeItem，永久失去衣物用 bsRemoveWardrobeItem。',
-  '性交留精用 bsAddSperm；排出残留精液用 bsDrainSperm；缓解生理需求用 bsExcreteMetabolism。',
+  '可受孕生殖道的插入／精液沉积／拔出用 bsAddSperm 状态机；排出既有残留精液用 bsDrainSperm；缓解生理需求用 bsExcreteMetabolism。',
   '跨日、重大事件或 notify 提醒时，可用 bsWriteDiary 为角色追加主观日记。',
   '月经阶段、排卵期、假孕期切换用 bsSetMenstrualPhases；不要用它覆盖正在进行的受精、真妊娠或产程。',
+  '剧情以特殊手段让逾期的妊娠延后不生用 bsExtendPregnancy（action=extend），结束延产用 action=induce；延产期间不能用 bsAbortion 或 bsChildbirth。',
   '流产用 bsAbortion；立即结束分娩用 bsChildbirth；角色在场状态变化用 bsSetCharacterPresence，参数必须为 female 和 isPresent（布尔值 true/false，不要使用 isHere）。角色明确回到当前场景、重新同行或参与当前互动时应设为 true；明确离开、失联或转为幕外时才设为 false。',
-  '母胎互动用 bsMaternalFetalInteraction；每名角色在每个新小时内仅允许一次成功的母胎互动变化，重复调用会被跳过。direction=fetal 时须传 change，表示胎儿对母体的亲近或排斥并改变 affinity，不补充营养。direction=maternal 时不传 change，表示母体安抚胎儿，系统随机判定 affinity 变化；若成功且有待安抚不适，小幅变化补回 1 点营养，大幅变化补回 2 点营养。若处于产兆前驱则表示分娩抵抗。',
+  '母胎互动用 bsMaternalFetalInteraction；每名角色在每个新小时内仅允许一次成功的母胎互动变化，重复调用会被跳过。direction=fetal 时须传 change，表示胎儿对母体的亲近或排斥并改变 affinity。direction=maternal 时不传 change，表示母体安抚胎儿，系统随机判定 affinity 变化。母胎互动不影响营养，也不改变胎位或产程。剧情明确出现人工胎位操作（转位、托高延后分娩、推送），或胎儿有意识地自己转身、缩回、往下钻时用 bsAssistFetalPosition（后者加 actor=fetus）。',
   '不要编造怀孕天数、胎数、流产、分娩或其他高影响事件。',
 ].join('\n')
 
@@ -126,6 +135,41 @@ export function normalizeApiFormat(value) {
   if (raw === API_FORMATS.CLAUDE_MESSAGES || raw === 'claude' || raw === 'messages' || raw === 'custom_claude_messages' || raw === 'anthropic') return API_FORMATS.CLAUDE_MESSAGES
   if (raw === API_FORMATS.GEMINI_INTERACTIONS || raw === 'gemini' || raw === 'interactions') return API_FORMATS.GEMINI_INTERACTIONS
   return API_FORMATS.OPENAI_COMPAT
+}
+
+// 思考强度（reasoning_effort）档位：'auto'（默认）与非法值都省略该参数、
+// 由服务端自定——即插件此前的原始行为，存量使用者零影响
+export const REASONING_EFFORTS = Object.freeze(['minimal', 'low', 'medium', 'high', 'xhigh', 'ultra', 'max', 'auto']);
+
+export function normalizeReasoningEffort(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (REASONING_EFFORTS.includes(raw)) return raw;
+  return 'auto';
+}
+
+/**
+ * 手填温度解析：有限数值（含 0.2）一律视为有效配置，钳制到 0~2；
+ * null/空/非法视为未配置。0.2 是否等同默认由 temperatureMode 决定，
+ * 本函数不做判断——manual 档下 0.2 与其他值一视同仁。
+ */
+export function resolveUserTemperature(settings) {
+  const rawInput = settings?.temperature;
+  const raw = typeof rawInput === 'string' ? rawInput.trim() : rawInput;
+  if (raw === '' || raw == null) return null;
+  const num = Number(raw);
+  if (!Number.isFinite(num)) return null;
+  return Math.max(0, Math.min(2, num));
+}
+
+// 溫度三態：'legacy' 沿用舊預設（預設，主 0.2／重試 0.1，預設可覆蓋）、
+// 'omit' 完全不傳 temperature（給不接受該參數的模型）、
+// 'manual' 每次都用手填值（含覆蓋預設）。
+export const TEMPERATURE_MODES = Object.freeze(['legacy', 'omit', 'manual']);
+
+export function normalizeTemperatureMode(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (TEMPERATURE_MODES.includes(raw)) return raw;
+  return 'legacy';
 }
 
 export function getApiEndpointSuffix(format) {
@@ -161,6 +205,8 @@ export const DEFAULT_SETTINGS = Object.freeze({
   iphoneCase: '#c8c2b8',
   iphoneFont: 'system',
   enabled: false,
+  // AI 回复后自动追踪；关掉只停自动分析，注入与手动分析照常（enabled 才是总开关）
+  autoTrackEnabled: true,
   useStPresetForAsync: false,
   trackerPresetName: '',
   trackerPromptToggles: {},
@@ -168,18 +214,27 @@ export const DEFAULT_SETTINGS = Object.freeze({
   apiUrl: '',
   apiFormat: API_FORMATS.OPENAI_COMPAT,
   apiKey: '',
+  apiProfiles: [],
   model: 'gpt-4.1-mini',
   modelOptions: [],
+  reasoningEffort: 'auto',
+  temperature: null,
+  temperatureMode: 'legacy',
   formattedOutputV4: true,
-  mvuExtraAnalysisCompat: true,
-  raceCatalogInPrompt: true,
-  triggerTiming: 'after_ai',
+  raceCatalogSelection: null,
+  worldBaselinePrompt: '',
+  realisticWorld: false,
+  specialTools: { implantEmbryo: true, wombReturn: true, extendPregnancy: true },
+  reproductiveSettings: normalizeReproductiveSettings(),
   pollMs: 1800,
   apiTimeoutMs: 180000,
   contextSize: 12,
   historyRegexRules: [],
+  mainflowCopyCharLimit: 400000,
   trackerTokenBudget: 4096,
-  requireFullDescriptionUpdates: false,
+  wombAnimation: true,
+  wardrobeSystemEnabled: true,
+  skillSystemEnabled: true,
   lukerMultiAgentManualOnly: true,
   diaryRecentLimit: 5,
   diaryWritingPrompt: DEFAULT_DIARY_WRITING_PROMPT,
@@ -187,7 +242,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
   wardrobePrepMainCount: 3,
   wardrobePrepAccessoryCount: 3,
   targetNames: '',
-  trackerWorldbookMode: 'exclude',
+  trackerWorldbookMode: 'mainflow',
   trackerWorldbookExcludeNames: '',
   trackerWorldbookIncludeNames: '',
   trackerGlobalWorldbookExcludeNames: '',
@@ -195,6 +250,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
   systemPrompt: DEFAULT_SYSTEM_PROMPT,
   registryCustomNotes: '',
   registrySkillPrompt: '',
+  registryOutfitPrompt: '',
   registryDescriptionGuides: DEFAULT_REGISTRY_DESCRIPTION_GUIDES,
   racePhysiologyOverrides: {},
   derivedTypeOverrides: {},
@@ -250,6 +306,7 @@ function pickFirstString(obj, paths) {
 function normalizePsychologyState(value) {
   const stageProfiles = normalizePsychologyStageProfiles(value?.stageProfiles)
   return {
+    ...(value || {}),
     mens: normalizePsychologyGroup(value?.mens, PSY_MENS_FIELDS, { booleanFields: PSY_MENS_BOOL_FIELDS, stageProfiles: stageProfiles.mens }),
     preg: normalizePsychologyGroup(value?.preg, PSY_PREG_FIELDS, { booleanFields: PSY_PREG_BOOL_FIELDS, stageProfiles: stageProfiles.preg }),
     stageProfiles,
@@ -276,7 +333,7 @@ function normalizePregFitState(value) {
   return {
     pregWearPressure: Math.max(0, Math.min(10, Number(value.pregWearPressure) || 0)),
     gap: {
-      masking: normalizeGap(gapSource.masking ?? gapSource.covering),
+      masking: normalizeGap(gapSource.masking),
       support: normalizeGap(gapSource.support),
       capacity: normalizeGap(gapSource.capacity),
       convenience: normalizeGap(gapSource.convenience),
@@ -284,12 +341,14 @@ function normalizePregFitState(value) {
   }
 }
 function normalizeOutfitState(value, wardrobe) {
-  const wardrobeItems = Array.isArray(wardrobe?.items) ? wardrobe.items : []
-  const temporaryItems = normalizeTemporaryOutfitItems(value?.temporaryItems)
-  const availableItems = [...wardrobeItems, ...temporaryItems]
-  const hasItem = (id, slot = '') => availableItems.some(item => item.id === id && (!slot || item.slot === slot))
-  const requestedMainId = normalizeWardrobeItemId(value?.mainItemId, 0)
-  const mainItemId = hasItem(requestedMainId, 'main') ? requestedMainId : 0
+  const wardrobeItems = Array.isArray(wardrobe?.items) ? wardrobe.items : [];
+  const transientItems = normalizeTransientOutfitItems(value?.transientItems);
+  const availableItems = [...wardrobeItems, ...transientItems];
+  const hasItem = (id, slot = '') => availableItems.some((item) => item.id === id && (!slot || item.slot === slot));
+  const requestedMainId = value?.mainItemId === null || value?.mainItemId === undefined
+    ? null
+    : normalizeWardrobeItemId(value.mainItemId, null);
+  const mainItemId = requestedMainId !== null && hasItem(requestedMainId, 'main') ? requestedMainId : null;
   const accessoryItemIds = Array.isArray(value?.accessoryItemIds)
     ? value.accessoryItemIds
         .map(item => normalizeWardrobeItemId(item))
@@ -298,7 +357,7 @@ function normalizeOutfitState(value, wardrobe) {
   return {
     mainItemId,
     accessoryItemIds,
-    temporaryItems,
+    transientItems,
     wearState: sanitizeWearState(value?.wearState),
     pregFit: normalizePregFitState(value?.pregFit),
   }
@@ -329,20 +388,64 @@ function stripRemovedOutfitDescriptionFields(text) {
   if (kept.length === entries.length) return source
   return kept.length > 0 ? `${kept.join(';;')};;` : ''
 }
+
+// ---- 画面事件 ----
+// 子宫图的特写演出只播「最近一个」事件：每个角色只记最后一笔 { type, seq }，
+// seq 单调递增，介面记住自己播到第几号，比它新才播。不随追踪轮次清空，也不进 prompt。
+// 异期受孕、孕中孕与孕期追加的代孕胚胎在揭晓前是隐藏的，它们的受孕与着床都不发事件，免得特写剧透。
+export const VISUAL_CUE_TYPES = Object.freeze([
+  'insert', 'insertCondom', 'ejaculate', 'ejaculateCondom', 'condomBreak', 'condomOverflow', 'ovulation',
+  'fertilization', 'surrogacy', 'chimera', 'rebirth',
+  'implantation', 'implantationFailed', 'rupture',
+]);
+
+export function setVisualCue(profile, type) {
+  if (!profile || typeof profile !== 'object' || !VISUAL_CUE_TYPES.includes(type)) return null;
+  const seq = Number.isInteger(profile.visualCue?.seq) ? profile.visualCue.seq + 1 : 1;
+  profile.visualCue = { type, seq };
+  return profile.visualCue;
+}
+
+function normalizeVisualCue(value) {
+  if (!value || typeof value !== 'object' || !VISUAL_CUE_TYPES.includes(value.type)) return null;
+  return Number.isInteger(value.seq) && value.seq > 0 ? { type: value.type, seq: value.seq } : null;
+}
 export function normalizeCharacterPsychologyState(characterState) {
-  if (!characterState || typeof characterState !== 'object') return characterState
-  if (!characterState.profile || typeof characterState.profile !== 'object') return characterState
-  characterState.profile.psychology = normalizePsychologyState(characterState.profile.psychology)
-  characterState.profile.skills = normalizeSkillList(characterState.profile.skills)
-  characterState.profile.talents = normalizeTalentList(characterState.profile.talents)
-  characterState.profile.skillHistory = normalizeSkillHistory(characterState.profile.skillHistory)
-  if (
-    characterState.profile.childSource &&
-    typeof characterState.profile.childSource === 'object' &&
-    !Array.isArray(characterState.profile.childSource)
-  ) {
-    const motherName = String(characterState.profile.childSource.motherName || '').trim()
-    const childIndex = Number(characterState.profile.childSource.childIndex)
+  if (!characterState || typeof characterState !== 'object') return characterState;
+  if (!characterState.profile || typeof characterState.profile !== 'object') return characterState;
+  normalizeCharacterBloodlines(characterState);
+  characterState.profile.psychology = normalizePsychologyState(characterState.profile.psychology);
+  characterState.profile.experience = normalizeExperience(characterState.profile.experience);
+  characterState.profile.cognitionRecords = normalizeCognitionRecords(characterState.profile.cognitionRecords);
+  for (const child of (characterState.profile.children || [])) {
+    if (child.selectedFather === undefined) child.selectedFather = null;
+  }
+  characterState.profile.skills = normalizeSkillList(characterState.profile.skills);
+  characterState.profile.talents = normalizeTalentList(characterState.profile.talents);
+  characterState.profile.skillHistory = normalizeSkillHistory(characterState.profile.skillHistory);
+  characterState.profile.visualCue = normalizeVisualCue(characterState.profile.visualCue);
+  characterState.profile.base = characterState.profile.base && typeof characterState.profile.base === 'object'
+    ? characterState.profile.base
+    : {};
+  const penetrationState = ['idle', 'inserted', 'spent'].includes(characterState.profile.base.penetrationState)
+    ? characterState.profile.base.penetrationState
+    : 'idle';
+  const penetrationSource = String(characterState.profile.base.penetrationSource || '').trim();
+  characterState.profile.base.penetrationState = penetrationState !== 'idle' && penetrationSource
+    ? penetrationState
+    : 'idle';
+  characterState.profile.base.penetrationSource = characterState.profile.base.penetrationState === 'idle'
+    ? null
+    : penetrationSource;
+  // 体型契合只在插入期间有意义；来源换人或拔出后的残留一律清掉
+  const penetrationFit = characterState.profile.base.penetrationFit;
+  if (penetrationFit !== undefined && (characterState.profile.base.penetrationState === 'idle'
+    || !penetrationFit || typeof penetrationFit !== 'object' || penetrationFit.male !== characterState.profile.base.penetrationSource)) {
+    characterState.profile.base.penetrationFit = null;
+  }
+  if (characterState.profile.childSource && typeof characterState.profile.childSource === 'object' && !Array.isArray(characterState.profile.childSource)) {
+    const motherName = String(characterState.profile.childSource.motherName || '').trim();
+    const childIndex = Number(characterState.profile.childSource.childIndex);
     if (motherName && Number.isInteger(childIndex) && childIndex >= 0) {
       const normalizedChildSource = {
         motherName,
@@ -357,34 +460,22 @@ export function normalizeCharacterPsychologyState(characterState) {
     }
   }
   if (Array.isArray(characterState.profile.children)) {
-    characterState.profile.children = characterState.profile.children.map(child => {
-      const next = { ...child, talents: normalizeTalentList(child?.talents ?? child?.inheritedTalents) }
-      delete next.inheritedTalents
-      return next
-    })
+    characterState.profile.children = characterState.profile.children.map((child) => {
+      const next = { ...child, talents: normalizeTalentList(child?.talents ?? child?.inheritedTalents) };
+      delete next.inheritedTalents;
+      if (next.selectedFather === undefined) next.selectedFather = null;
+      return next;
+    });
   }
   if (Array.isArray(characterState.profile.pregnant?.fetuses)) {
-    characterState.profile.pregnant.fetuses = characterState.profile.pregnant.fetuses.map(fetus => {
-      const next = { ...fetus, talents: normalizeTalentList(fetus?.talents ?? fetus?.inheritedTalents) }
-      delete next.inheritedTalents
-      return next
-    })
+    characterState.profile.pregnant.fetuses = characterState.profile.pregnant.fetuses.map((fetus) => {
+      const next = { ...fetus, talents: normalizeTalentList(fetus?.talents ?? fetus?.inheritedTalents) };
+      delete next.inheritedTalents;
+      return next;
+    });
   }
-  if (characterState.profile.wardrobe?.enabled) {
-    characterState.profile.wardrobe = normalizeWardrobeState(characterState.profile.wardrobe)
-    characterState.profile.outfit = normalizeOutfitState(characterState.profile.outfit, characterState.profile.wardrobe)
-  } else {
-    delete characterState.profile.wardrobe
-    delete characterState.profile.outfit
-  }
-  const descriptions = characterState.profile.descriptions
-  if (descriptions && typeof descriptions === 'object' && !Array.isArray(descriptions)) {
-    for (const key of ['normalDescription', 'pregnantDescription']) {
-      if (typeof descriptions[key] === 'string' && descriptions[key]) {
-        descriptions[key] = stripRemovedOutfitDescriptionFields(descriptions[key])
-      }
-    }
-  }
+  characterState.profile.wardrobe = normalizeWardrobeState(characterState.profile.wardrobe);
+  characterState.profile.outfit = normalizeOutfitState(characterState.profile.outfit, characterState.profile.wardrobe);
   const metabolism = characterState.profile.metabolism
   if (metabolism && typeof metabolism === 'object' && !Array.isArray(metabolism)) {
     if (metabolism.excretion === undefined && (metabolism.urine !== undefined || metabolism.stool !== undefined)) {
@@ -451,12 +542,16 @@ export function deriveMenstrualStageState() {
   const days = randomInt(0, MENSTRUAL_STAGE_DAYS[stage])
   return { stage, days }
 }
-export function derivePregnancyStageState(pregnantDays, gestationSpeed = 1) {
-  const actualPregnantDays = Math.max(0, Number(pregnantDays) || 0)
-  const speed = Math.max(0.1, Number(gestationSpeed) || 1)
-  const stageNames = ['孕早期', '孕中期', '孕晚期', '临产期']
-  let totalPregnancyDays = 0
-  for (const stageName of stageNames) totalPregnancyDays += PREGNANCY_STAGE_DAYS[stageName] / speed
+export function derivePregnancyStageState(pregnantDays, gestationSpeed = 1, { extensionUntilDays = null } = {}) {
+  const actualPregnantDays = Math.max(0, Number(pregnantDays) || 0);
+  const speed = Math.max(0.1, Number(gestationSpeed) || 1);
+  // 延产期按到期日黏住，不随孕日推回逾期；到期与否由时间推进处理（到期就进产兆前驱并清掉到期日）
+  if (extensionUntilDays !== null && extensionUntilDays !== undefined && Number.isFinite(Number(extensionUntilDays))) {
+    return { stage: '延产期', days: Math.max(0, actualPregnantDays - POSTTERM_START_DAYS) };
+  }
+  const stageNames = ['孕早期', '孕中期', '孕晚期', '临产期'];
+  let totalPregnancyDays = 0;
+  for (const stageName of stageNames) totalPregnancyDays += PREGNANCY_STAGE_DAYS[stageName] / speed;
   if (actualPregnantDays > totalPregnancyDays) {
     return {
       stage: '逾期',
@@ -501,24 +596,24 @@ export function derivePregnancyStageState(pregnantDays, gestationSpeed = 1) {
  * 是计算结果/兼容旧状态的字段，不应被视为独立的第三套妊娠速度规则。
  */
 export function getGestationSpeciesSpeed(profile) {
-  const baseSpeed = Number(profile?.bio?.gestationSpeciesSpeed)
-  if (Number.isFinite(baseSpeed) && baseSpeed > 0) return Math.max(0.1, Math.min(20, baseSpeed))
-  return 1
+  const baseSpeed = Number(profile?.bio?.gestationSpeciesSpeed);
+  if (Number.isFinite(baseSpeed) && baseSpeed > 0) return Math.max(GESTATION_SPEED_MIN, Math.min(GESTATION_SPEED_MAX, baseSpeed));
+  return 1;
 }
 export function getGestationModifierMultiplier(profile) {
-  const multiplier = Number(profile?.bio?.gestationModifierMultiplier)
-  if (Number.isFinite(multiplier) && multiplier >= 0) return Math.max(0, Math.min(20, multiplier))
-  return 1
+  const multiplier = Number(profile?.bio?.gestationModifierMultiplier);
+  if (Number.isFinite(multiplier) && multiplier >= 0) return Math.max(0, Math.min(GESTATION_SPEED_MAX, multiplier));
+  return 1;
 }
 export function getGestationEffectiveSpeed(profile) {
   const hasSpeciesSpeed = Number.isFinite(Number(profile?.bio?.gestationSpeciesSpeed))
   const hasModifierMultiplier = Number.isFinite(Number(profile?.bio?.gestationModifierMultiplier))
   if (hasSpeciesSpeed || hasModifierMultiplier) {
-    return Math.max(0, Math.min(20, getGestationSpeciesSpeed(profile) * getGestationModifierMultiplier(profile)))
+    return Math.max(0, Math.min(GESTATION_SPEED_MAX, getGestationSpeciesSpeed(profile) * getGestationModifierMultiplier(profile)));
   }
-  const effectiveSpeed = Number(profile?.bio?.gestationEffectiveSpeed)
-  if (Number.isFinite(effectiveSpeed) && effectiveSpeed >= 0) return Math.max(0, Math.min(20, effectiveSpeed))
-  return 1
+  const effectiveSpeed = Number(profile?.bio?.gestationEffectiveSpeed);
+  if (Number.isFinite(effectiveSpeed) && effectiveSpeed >= 0) return Math.max(0, Math.min(GESTATION_SPEED_MAX, effectiveSpeed));
+  return 1;
 }
 export function syncCharacterStageFromProfile(characterState) {
   const next = characterState
@@ -548,7 +643,7 @@ export function syncCharacterStageFromProfile(characterState) {
       }
       return next
     }
-    const derived = derivePregnancyStageState(pregnant.effectivePregnantDays, 1)
+    const derived = derivePregnancyStageState(pregnant.effectivePregnantDays, 1, pregnant);
     next.profile.base = {
       ...base,
       stage: derived.stage,
@@ -639,16 +734,18 @@ export function createChildId() {
 }
 export function createEmptyChatState() {
   return {
+    schemaVersion: CHAT_STATE_SCHEMA_VERSION,
     lastAttemptedSignature: '',
     lastProcessedSignature: '',
-    lastFailedSignature: '',
     // 失败当下「整段对话」的签名，用来判断是否该挡下自动重试
     lastFailedChatSignature: '',
     lastRunAt: 0,
     sceneSummary: '',
     minutesPassed: 0,
+    skillBaselinePrompt: '',
     skillCatalog: [],
     nextSkillId: 1,
+    cardSkillSeedApplied: false,
     // null-proto：角色名直接作键，模型吐出 constructor/toString/__proto__ 之类的名字时
     // 不会取到继承来的内建属性（那会让本该 skip 的调用变成拿函数当角色对象崩掉）
     characters: Object.create(null),
@@ -664,6 +761,7 @@ export function createDefaultFemaleState(name = '') {
     name: String(name || '').trim(),
     initialized: false,
     profile: {
+      visualCue: null,
       cooldown: {
         orgasmOvulationUsed: false,
         naturalOvulationUsed: false,
@@ -677,6 +775,8 @@ export function createDefaultFemaleState(name = '') {
         days: 0,
         fertilizationDays: 0,
         latestSexDays: null,
+        penetrationState: 'idle',
+        penetrationSource: null,
         age: 15,
         stage: null,
         race: '人类',
@@ -690,6 +790,7 @@ export function createDefaultFemaleState(name = '') {
         psyStress: getPsyStressInitByLevel(psyStressLevel),
         vitalityLevel,
         psyStressLevel,
+        uterineAtony: 0,
       },
       pregnant: {
         pregnantDays: 0,
@@ -697,16 +798,17 @@ export function createDefaultFemaleState(name = '') {
         laborHours: 0,
         effectiveLaborHours: 0,
         laborPhase: null,
-        laborFetusIndex: 0,
+        laborBirthNumber: 0,
+        deliveredCount: 0,
+        extensionCount: 0,
+        extensionUntilDays: null,
+        presentingEmbryoId: null,
         laborPain: 0,
         prodromalOriginStage: null,
         prodromalRemainingHours: 0,
         prodromalDelayProgressHours: 0,
         fetusesCount: 0,
         fetalEnergyDrain: 0,
-        amnionDurability: 0,
-        nutrition: 0,
-        symptomReliefPending: 0,
         blockage: null,
         acceleration: null,
         expansion: null,
@@ -715,18 +817,20 @@ export function createDefaultFemaleState(name = '') {
       experience: {
         virginity: null,
         latestSexPartner: null,
-        emotionalMate: null,
-        marriageMate: null,
+        emotionalMates: [],
+        marriageMates: [],
         pregnantExperience: 0,
         naturalBirthExperience: 0,
         surgicalBirthExperience: 0,
         miscarriageExperience: 0,
+        abortionExperience: 0,
       },
       psychology: {
         mens: buildEmptyPsychologyGroup(PSY_MENS_FIELDS, PSY_MENS_BOOL_FIELDS),
         preg: buildEmptyPsychologyGroup(PSY_PREG_FIELDS, PSY_PREG_BOOL_FIELDS),
         stageProfiles: {},
       },
+      cognitionRecords: [],
       children: [],
       skills: [],
       talents: [],
@@ -756,8 +860,19 @@ export function createDefaultFemaleState(name = '') {
         flux: 0,
       },
       descriptions: {
-        normalDescription: '',
-        pregnantDescription: '',
+        normalDescription: [],
+        pregnantDescription: [],
+      },
+      wardrobe: {
+        enabled: true,
+        items: [createDefaultWardrobeItem()],
+      },
+      outfit: {
+        mainItemId: null,
+        accessoryItemIds: [],
+        transientItems: [],
+        wearState: DEFAULT_WEAR_STATE,
+        pregFit: null,
       },
       notify: {
         firstly: '',
@@ -772,6 +887,98 @@ export function createDefaultFemaleState(name = '') {
     },
   }
   return syncCharacterStageFromProfile(normalizeCharacterPsychologyState(character))
+}
+const API_PROFILE_LIMIT = 30;
+const API_PROFILE_FIELDS = Object.freeze([
+  'apiUrl', 'apiFormat', 'apiKey', 'model', 'temperatureMode', 'temperature', 'reasoningEffort', 'formattedOutputV4',
+  // 主线复制的字数上限要跟着这组 API 的上下文大小走
+  'mainflowCopyCharLimit',
+]);
+
+/**
+ * 已命名的连接配置组：名称唯一（去头尾空白后比对）。
+ * 保存系统页分隔线以上的整段连接设定：端点、格式、Key、模型、温度、思考强度与格式化输出
+ */
+/** 主线复制字数上限：缺值用预设 40 万，0 表示不限，其余至少 1 万字（与 api.js 的解析一致） */
+export function normalizeMainflowCopyCharLimit(value) {
+  if (value === undefined || value === null || value === '') return 400000;
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 400000;
+  return number <= 0 ? 0 : Math.max(10000, Math.floor(number));
+}
+
+export function normalizeApiProfiles(list) {
+  const seen = new Set();
+  const profiles = [];
+  for (const entry of (Array.isArray(list) ? list : [])) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+    const name = String(entry.name || '').trim().slice(0, 40);
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    profiles.push({
+      name,
+      apiUrl: String(entry.apiUrl || '').trim(),
+      apiFormat: normalizeApiFormat(entry.apiFormat),
+      apiKey: String(entry.apiKey || '').trim(),
+      model: String(entry.model || '').trim(),
+      temperatureMode: normalizeTemperatureMode(entry.temperatureMode),
+      temperature: resolveUserTemperature(entry),
+      reasoningEffort: normalizeReasoningEffort(entry.reasoningEffort),
+      formattedOutputV4: entry.formattedOutputV4 !== false,
+      mainflowCopyCharLimit: normalizeMainflowCopyCharLimit(entry.mainflowCopyCharLimit),
+    });
+    if (profiles.length >= API_PROFILE_LIMIT) break;
+  }
+  return profiles;
+}
+
+/** 以当前连接设定新增或覆盖同名配置组，回传是否为覆盖 */
+export function saveApiProfile(settings, name) {
+  const trimmed = String(name || '').trim().slice(0, 40);
+  if (!trimmed) throw new Error('请先输入配置组名称');
+  const profiles = normalizeApiProfiles(settings.apiProfiles);
+  const index = profiles.findIndex((profile) => profile.name === trimmed);
+  if (index < 0 && profiles.length >= API_PROFILE_LIMIT) throw new Error(`最多保存 ${API_PROFILE_LIMIT} 组`);
+  const profile = { name: trimmed, ...Object.fromEntries(API_PROFILE_FIELDS.map((field) => [field, settings[field]])) };
+  if (index >= 0) profiles[index] = profile;
+  else profiles.push(profile);
+  settings.apiProfiles = normalizeApiProfiles(profiles);
+  return index >= 0;
+}
+
+/** 把配置组套回当前连接设定；换端点后旧的模型列表不再适用，一并清空 */
+export function applyApiProfile(settings, name) {
+  const profile = normalizeApiProfiles(settings.apiProfiles).find((entry) => entry.name === String(name || '').trim());
+  if (!profile) throw new Error('找不到这个配置组');
+  for (const field of API_PROFILE_FIELDS) settings[field] = profile[field];
+  settings.modelOptions = [];
+  return profile;
+}
+
+export function deleteApiProfile(settings, name) {
+  const trimmed = String(name || '').trim();
+  const profiles = normalizeApiProfiles(settings.apiProfiles);
+  const next = profiles.filter((profile) => profile.name !== trimmed);
+  if (next.length === profiles.length) throw new Error('找不到这个配置组');
+  settings.apiProfiles = next;
+}
+
+/** 着衣系统总开关：关闭时衣柜页、注册着衣页与 tracker 的衣柜工具、说明、状态全部停用，资料保留 */
+export function isWardrobeSystemEnabled(settings) {
+  return settings?.wardrobeSystemEnabled !== false;
+}
+
+/** 技能系统总开关：关闭时技能页、注册技能页与 tracker 的技能工具、图鉴、说明、技能／天赋状态全部停用，资料保留 */
+export function isSkillSystemEnabled(settings) {
+  return settings?.skillSystemEnabled !== false;
+}
+
+/**
+ * 世界书模式只有主流（宿主触发的条目，可排除）与参考（只送手动勾选的条目）。
+ * 1.1.6 起拿掉的「正常模式」（送全部启用条目再排除）并入主流模式，排除名单照旧沿用。
+ */
+export function normalizeWorldbookMode(value) {
+  return String(value || '').trim() === 'allowlist_all' ? 'allowlist_all' : 'mainflow';
 }
 export function getSettings(ctx) {
   const root = getHostExtensionSettings(ctx)
@@ -806,6 +1013,13 @@ export function getSettings(ctx) {
       console.warn('[BS BioTracker] unable to normalize chatStates for host store, continuing', error)
     }
   }
+  // 1.1.6 前 enabled 只管自动追踪，关掉时注入照常；拆成总开关与自动追踪后，
+  // 旧的「关」换成「总开关开、自动追踪关」，行为与更新前一样
+  if (settings.autoTrackEnabled === undefined && settings.enabled === false) {
+    settings.enabled = true;
+    settings.autoTrackEnabled = false;
+    shouldSave = true;
+  }
   for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
     if (useHostChatStore && key === 'chatStates') continue
     if (settings[key] === undefined) {
@@ -816,6 +1030,27 @@ export function getSettings(ctx) {
   if (!settings.chatStates || typeof settings.chatStates !== 'object') {
     settings.chatStates = {}
     shouldSave = true
+  }
+  if (settings.trackerWorldbookMode !== normalizeWorldbookMode(settings.trackerWorldbookMode)) {
+    settings.trackerWorldbookMode = normalizeWorldbookMode(settings.trackerWorldbookMode);
+    shouldSave = true;
+  }
+  // 触发时机已固定为 AI 回复后（见 shouldTriggerForMessage），旧设定里的选项不再有作用
+  if (Object.prototype.hasOwnProperty.call(settings, 'triggerTiming')) {
+    delete settings.triggerTiming;
+    shouldSave = true;
+  }
+  // 描述完整更新已改为固定规则（见 tracker_prompt_context.js），旧开关不再有作用
+  if (Object.prototype.hasOwnProperty.call(settings, 'requireFullDescriptionUpdates')) {
+    delete settings.requireFullDescriptionUpdates;
+    shouldSave = true;
+  }
+  // 旧版切卡时留下的临时键空壳（见 getChatState）：只清完全没有资料的，有内容的一律保留
+  for (const key of Object.keys(settings.chatStates)) {
+    if (PLACEHOLDER_CHAT_KEY_PATTERN.test(key) && isChatStateEffectivelyEmpty(settings.chatStates[key])) {
+      delete settings.chatStates[key];
+      shouldSave = true;
+    }
   }
   if (!Array.isArray(settings.modelOptions)) {
     settings.modelOptions = []
@@ -874,12 +1109,24 @@ export function getSettings(ctx) {
     settings.trackerTokenBudget = trackerTokenBudget
     shouldSave = true
   }
-  const requireFullDescriptionUpdates = settings.requireFullDescriptionUpdates === true
-  if (settings.requireFullDescriptionUpdates !== requireFullDescriptionUpdates) {
-    settings.requireFullDescriptionUpdates = requireFullDescriptionUpdates
-    shouldSave = true
+  const wombAnimation = settings.wombAnimation !== false;
+  if (settings.wombAnimation !== wombAnimation) {
+    settings.wombAnimation = wombAnimation;
+    shouldSave = true;
   }
-  const lukerMultiAgentManualOnly = settings.lukerMultiAgentManualOnly !== false
+  const apiProfiles = normalizeApiProfiles(settings.apiProfiles);
+  if (JSON.stringify(apiProfiles) !== JSON.stringify(settings.apiProfiles)) {
+    settings.apiProfiles = apiProfiles;
+    shouldSave = true;
+  }
+  for (const key of ['wardrobeSystemEnabled', 'skillSystemEnabled']) {
+    const enabled = settings[key] !== false;
+    if (settings[key] !== enabled) {
+      settings[key] = enabled;
+      shouldSave = true;
+    }
+  }
+  const lukerMultiAgentManualOnly = settings.lukerMultiAgentManualOnly !== false;
   if (settings.lukerMultiAgentManualOnly !== lukerMultiAgentManualOnly) {
     settings.lukerMultiAgentManualOnly = lukerMultiAgentManualOnly
     shouldSave = true
@@ -902,22 +1149,250 @@ export function getSettings(ctx) {
     settings.apiFormat = normalizedApiFormat
     shouldSave = true
   }
-  if (shouldSave) saveHostSettings(ctx)
-  return settings
+  const normalizedReasoningEffort = normalizeReasoningEffort(settings.reasoningEffort);
+  if (settings.reasoningEffort !== normalizedReasoningEffort) {
+    settings.reasoningEffort = normalizedReasoningEffort;
+    shouldSave = true;
+  }
+  // temperature 存储归一：null 表示未配置；有限数值（含 0.2）钳制到 0~2 后保留。
+  // 0.2 是否等同默认由 temperatureMode 决定，这里只做数值归一。
+  const normalizedStoredTemperature = resolveUserTemperature(settings);
+  if (settings.temperature !== normalizedStoredTemperature) {
+    settings.temperature = normalizedStoredTemperature;
+    shouldSave = true;
+  }
+  const normalizedTemperatureMode = normalizeTemperatureMode(settings.temperatureMode);
+  if (settings.temperatureMode !== normalizedTemperatureMode) {
+    settings.temperatureMode = normalizedTemperatureMode;
+    shouldSave = true;
+  }
+  if (shouldSave) saveHostSettings(ctx);
+  syncCardSettings(ctx, settings);
+  return settings;
 }
+
+// ── 跨分页同步（见 save_sync.js）──────────────────────
+// 宿主整份写回插件资料：另一个分页存过更新的版本后，这个分页手上的旧副本一写就会把它盖掉。
+// 只有内容真的变了才领新版本号（载入时的例行存档不抢号）。存档时：
+// - 过期而且自己没改过的聊天：先从宿主读回，不拿旧副本覆盖
+// - 过期但自己刚有改动（两边都改了）：以这个分页为准，使用者刚在这里操作
+// 「改过」以上次同步时的内容杂凑判断。
+const STALE_REFRESH_ATTEMPTS = 3;
+const STALE_REFRESH_RETRY_MS = 1000;
+const syncedChatHashes = new Map();
+let staleRefreshInFlight = null;
+
+function getStoredChatStates(ctx) {
+  const chatStates = getHostExtensionSettings(ctx)?.[MODULE_NAME]?.chatStates;
+  return chatStates && typeof chatStates === 'object' ? chatStates : null;
+}
+
+/** 内容杂凑，不含版本号本身 */
+function hashChatState(chatState) {
+  const text = JSON.stringify(chatState ? { ...chatState, saveRevision: undefined } : null) || '';
+  let hash = 2166136261;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${(hash >>> 0).toString(36)}:${text.length}`;
+}
+
+/** 把记忆体里的内容记为「已与宿主同步」：载入、切换聊天、读回或写入后呼叫 */
+export function markChatStatesSynced(ctx, keys = null) {
+  const chatStates = getStoredChatStates(ctx);
+  if (!chatStates) return;
+  for (const key of keys || Object.keys(chatStates)) {
+    if (chatStates[key]) syncedChatHashes.set(key, hashChatState(chatStates[key]));
+  }
+}
+
+function isChatStateDirty(key, chatState) {
+  if (!chatState) return false;
+  // 这个分页还没记过基准：视为没改过，宁可读回也不拿可能过期的副本去覆盖
+  if (!syncedChatHashes.has(key)) return false;
+  return syncedChatHashes.get(key) !== hashChatState(chatState);
+}
+
+export function findStaleChatKeys(ctx) {
+  const chatStates = getStoredChatStates(ctx);
+  if (!chatStates) return [];
+  return Object.entries(chatStates)
+    .filter(([key, chatState]) => readLatestChatRevision(key) > (Number(chatState?.saveRevision) || 0))
+    .map(([key]) => key);
+}
+
+/** 过期且自己没改过的聊天才需要读回；自己刚改过的留给这次存档覆盖 */
+function findStaleCleanChatKeys(ctx) {
+  const chatStates = getStoredChatStates(ctx) || {};
+  return findStaleChatKeys(ctx).filter((key) => !isChatStateDirty(key, chatStates[key]));
+}
+
+/**
+ * 从宿主读回指定聊天的最新存档。SillyTavern 读 settings.json；TauriTavern／Luker 以聊天旁档案为准：
+ * 当前聊天直接读回，其他聊天丢掉记忆体里的旧副本，下次打开时再从档案载入。回传有更新的聊天键。
+ */
+export async function refreshChatStatesFromHost(ctx, keys) {
+  const chatStates = getStoredChatStates(ctx);
+  if (!chatStates || !Array.isArray(keys) || keys.length === 0) return [];
+  // 自己刚改过的聊天不读回，免得把这个分页的新改动洗掉
+  const targets = keys.filter((key) => !isChatStateDirty(key, chatStates[key]));
+  if (targets.length === 0) return [];
+  const refreshed = [];
+  const isNewer = (stored, key) => stored && (Number(stored.saveRevision) || 0) >= (Number(chatStates[key]?.saveRevision) || 0);
+  if (getHostKind() === 'sillytavern') {
+    try {
+      const headers = typeof ctx?.getRequestHeaders === 'function' ? ctx.getRequestHeaders() : { 'Content-Type': 'application/json' };
+      const response = await fetch('/api/settings/get', { method: 'POST', headers, body: '{}' });
+      if (!response.ok) return [];
+      const data = await response.json();
+      const onDisk = JSON.parse(data?.settings || '{}')?.extension_settings?.[MODULE_NAME]?.chatStates || {};
+      for (const key of targets) {
+        if (!isNewer(onDisk[key], key)) continue;
+        chatStates[key] = onDisk[key];
+        refreshed.push(key);
+      }
+    } catch (error) {
+      console.warn('[BS BioTracker] unable to refresh chat states from SillyTavern settings', error);
+      return [];
+    }
+  } else {
+    const currentKey = getChatKey(ctx);
+    for (const key of targets) {
+      if (key !== currentKey) {
+        delete chatStates[key];
+        syncedChatHashes.delete(key);
+        refreshed.push(key);
+        continue;
+      }
+      const stored = await loadHostChatState(ctx);
+      if (!isNewer(stored, key)) continue;
+      chatStates[key] = stored;
+      refreshed.push(key);
+    }
+  }
+  markChatStatesSynced(ctx, refreshed.filter((key) => chatStates[key]));
+  if (refreshed.length > 0 && typeof globalThis.dispatchEvent === 'function' && typeof globalThis.CustomEvent === 'function') {
+    globalThis.dispatchEvent(new CustomEvent('bs-biotracker:chat-states-refreshed', { detail: { keys: refreshed } }));
+  }
+  return refreshed;
+}
+
+/** 过期又没改过的聊天先读回；多次读回仍过期（对方还没写完）时以宿主内容为准放行，以免永远存不了档 */
+async function refreshStaleChatStatesBeforeSave(ctx) {
+  if (staleRefreshInFlight) return staleRefreshInFlight;
+  staleRefreshInFlight = (async () => {
+    try {
+      for (let attempt = 0; attempt < STALE_REFRESH_ATTEMPTS; attempt += 1) {
+        const stale = findStaleCleanChatKeys(ctx);
+        if (stale.length === 0) return;
+        await refreshChatStatesFromHost(ctx, stale);
+        if (findStaleCleanChatKeys(ctx).length === 0) return;
+        await new Promise((resolve) => setTimeout(resolve, STALE_REFRESH_RETRY_MS));
+      }
+      const chatStates = getStoredChatStates(ctx);
+      for (const key of findStaleCleanChatKeys(ctx)) {
+        if (chatStates?.[key]) chatStates[key].saveRevision = readLatestChatRevision(key);
+      }
+    } finally {
+      staleRefreshInFlight = null;
+    }
+  })();
+  return staleRefreshInFlight;
+}
+
+/** 当前聊天有改动才领新版本号；占位键不记 */
+function claimCurrentChatRevision(ctx) {
+  const chatKey = getChatKey(ctx);
+  const chatState = getStoredChatStates(ctx)?.[chatKey];
+  if (!chatState || isPlaceholderHostChatId(ctx, chatKey)) return { chatKey, chatState, revision: null };
+  // 基准不存在时（这个分页第一次存这个聊天）也算有改动，领号后记下基准
+  const changed = !syncedChatHashes.has(chatKey) || isChatStateDirty(chatKey, chatState);
+  if (!changed) return { chatKey, chatState, revision: null };
+  const claim = claimChatRevision(chatKey, chatState.saveRevision, { force: true });
+  if (claim.latest && claim.latest > (Number(chatState.saveRevision) || 0)) {
+    console.warn(`[BS BioTracker] chat ${chatKey} was also changed in another tab; keeping this tab's changes`);
+  }
+  chatState.saveRevision = claim.revision;
+  syncedChatHashes.set(chatKey, hashChatState(chatState));
+  queueRevisionAnnouncement(chatKey, claim.revision);
+  return { chatKey, chatState, revision: claim.revision };
+}
+
+/**
+ * SillyTavern 的设定存档：宿主自己的延迟是 1 秒，存档前还要先压缩整份设定；页面在这之前刷新就丢资料，
+ * 而离开确认框跳出时页面脚本是暂停的，补存来不及送出。插件的存档改为只合并 0.05 秒内的连续存档，
+ * 随即呼叫宿主的立即存档，并依序送出，避免较旧的内容后到而盖掉较新的。
+ * TauriTavern／Luker 不走这里：宿主设定照旧延迟，聊天状态另存在聊天旁档案。
+ */
+const HOST_SETTINGS_COALESCE_MS = 50;
+let hostSettingsSaveTimer = null;
+let hostSettingsSaveChain = Promise.resolve();
+
+function scheduleHostSettingsSave(ctx) {
+  markHostSettingsPending();
+  if (getHostKind() !== 'sillytavern') {
+    saveHostSettings(ctx);
+    return;
+  }
+  clearTimeout(hostSettingsSaveTimer);
+  hostSettingsSaveTimer = setTimeout(() => {
+    hostSettingsSaveTimer = null;
+    hostSettingsSaveChain = hostSettingsSaveChain.catch(() => {}).then(async () => {
+      const startedAt = Date.now();
+      try {
+        await saveHostSettingsImmediately(ctx);
+        clearHostSettingsPendingUpTo(startedAt);
+      } catch (error) {
+        // 立即存档不可用（例如宿主没开放）时退回宿主自己的延迟存档，资料仍会写入，只是慢一点
+        console.warn('[BS BioTracker] immediate settings save failed; falling back to the host debounce', error);
+        saveHostSettings(ctx);
+      }
+    });
+  }, HOST_SETTINGS_COALESCE_MS);
+}
+
+function writeSettingsDeferred(ctx) {
+  const { chatKey, chatState, revision } = claimCurrentChatRevision(ctx);
+  scheduleHostSettingsSave(ctx);
+  if (chatState) scheduleHostChatStateSave(ctx, chatState, revision ? () => announceSavedRevisions({ [chatKey]: revision }) : null);
+}
+
 export function saveSettings(ctx) {
-  saveHostSettings(ctx)
-  const root = getHostExtensionSettings(ctx)
-  const chatState = root?.[MODULE_NAME]?.chatStates?.[getChatKey(ctx)]
-  if (chatState) scheduleHostChatStateSave(ctx, chatState)
+  if (findStaleCleanChatKeys(ctx).length > 0) {
+    void refreshStaleChatStatesBeforeSave(ctx).then(() => writeSettingsDeferred(ctx));
+    return;
+  }
+  writeSettingsDeferred(ctx);
+}
+
+/** 保存全局设置，并等待 ST 立即存档或当前聊天的 TT／Luker sidecar 真正写入。 */
+export async function saveSettingsNow(ctx) {
+  if (findStaleCleanChatKeys(ctx).length > 0) await refreshStaleChatStatesBeforeSave(ctx);
+  const { chatKey, chatState, revision } = claimCurrentChatRevision(ctx);
+  clearTimeout(hostSettingsSaveTimer);
+  hostSettingsSaveTimer = null;
+  markHostSettingsPending();
+  // 延后写入保留为收敛写：若已有旧的 ST 设置请求在飞，它会在稍后用当前状态再写一次。
+  saveHostSettings(ctx);
+  const startedAt = Date.now();
+  // 呼叫端在等这次写入（删除、注销等），立刻送出；之后排程的存档接在它后面
+  const immediate = saveHostSettingsImmediately(ctx);
+  hostSettingsSaveChain = immediate.catch(() => {});
+  await immediate;
+  clearHostSettingsPendingUpTo(startedAt);
+  if (chatState) await flushHostChatStateSave(ctx, chatState, revision ? () => announceSavedRevisions({ [chatKey]: revision }) : null);
 }
 export async function hydrateChatStateFromHost(ctx, settings) {
-  if (!settings?.chatStates || typeof settings.chatStates !== 'object') return false
-  const initialKey = await resolveHostChatId(ctx)
-  const localState = settings.chatStates[initialKey]
-  if (localState && !isChatStateEffectivelyEmpty(localState)) return false
-  const storedState = await loadHostChatState(ctx)
-  if (!storedState || isChatStateEffectivelyEmpty(storedState)) return false
+  if (!settings?.chatStates || typeof settings.chatStates !== 'object') return false;
+  const initialKey = await resolveHostChatId(ctx);
+  const localState = settings.chatStates[initialKey];
+  if (localState && !isChatStateEffectivelyEmpty(localState)) return false;
+  const storedState = await loadHostChatState(ctx);
+  // 空的旧版存档也必须载入：schema migration 会把它标记为已处理，避免
+  // 角色卡技能种子在旧聊天首次打开时凭空注入。完全没有存档仍由 null 区分。
+  if (!storedState) return false;
+  if (isChatStateEffectivelyEmpty(storedState) && getChatStateSchemaVersion(storedState) >= CHAT_STATE_SCHEMA_VERSION) return false;
   // 载入过程本身可能才等到宿主句柄就绪，这时稳定 id 才算得出来。
   // 必须用最终的 key 落盘：否则资料会留在 fallback key 下，
   // 而面板之后是用稳定 id 去读的，等于载入了却还是显示「没有注册角色」。
@@ -930,12 +1405,19 @@ export function getChatKey(ctx) {
   return getHostChatId(ctx)
 }
 export function getChatState(ctx, settings) {
-  const chatKey = getChatKey(ctx)
-  if (!settings.chatStates[chatKey]) settings.chatStates[chatKey] = createEmptyChatState()
+  const chatKey = getChatKey(ctx);
+  if (!settings.chatStates[chatKey]) {
+    // 临时键只是切卡过渡，不是真的聊天：给一份不落盘的空状态，
+    // 写进设定的话每次切卡都会留下一份无主空壳；也不复制分支资料
+    if (isPlaceholderHostChatId(ctx, chatKey)) return createEmptyChatState();
+    settings.chatStates[chatKey] = createEmptyChatState();
+    inheritChatStateFromMatchingChat(ctx, settings);
+  }
   const chatState = settings.chatStates[chatKey]
   let shouldSave = false
   // 存量状态迁移：早期 characters 是普通 {}，读取时重建为 null-proto
   const rawCharacters = chatState.characters
+  // 存档是 JSON，每次读回来 characters 都是普通物件，要重建为 null-proto（见 createEmptyChatState）
   if (!rawCharacters || typeof rawCharacters !== 'object') {
     chatState.characters = Object.create(null)
     shouldSave = true
@@ -958,15 +1440,19 @@ export function getChatState(ctx, settings) {
       }
     }
   }
-  const normalizedSkillCatalog = normalizeSkillCatalog(chatState.skillCatalog)
-  if (JSON.stringify(chatState.skillCatalog || []) !== JSON.stringify(normalizedSkillCatalog)) shouldSave = true
-  chatState.skillCatalog = normalizedSkillCatalog
-  const normalizedNextSkillId = normalizeNextSkillId(chatState.skillCatalog, chatState.nextSkillId)
-  if (chatState.nextSkillId !== normalizedNextSkillId) shouldSave = true
-  chatState.nextSkillId = normalizedNextSkillId
-  if (!Array.isArray(chatState.snapshots)) chatState.snapshots = []
-  if (!Array.isArray(chatState.lastOperationLogs)) chatState.lastOperationLogs = []
-  const sanitizedCurrentPayload = sanitizeSnapshotPayload(chatState)
+  if (migrateChatStateSchema(chatState)) shouldSave = true;
+  const normalizedSkillCatalog = normalizeSkillCatalog(chatState.skillCatalog);
+  if (JSON.stringify(chatState.skillCatalog || []) !== JSON.stringify(normalizedSkillCatalog)) shouldSave = true;
+  chatState.skillCatalog = normalizedSkillCatalog;
+  const normalizedSkillBaselinePrompt = String(chatState.skillBaselinePrompt || '');
+  if (chatState.skillBaselinePrompt !== normalizedSkillBaselinePrompt) shouldSave = true;
+  chatState.skillBaselinePrompt = normalizedSkillBaselinePrompt;
+  const normalizedNextSkillId = normalizeNextSkillId(chatState.skillCatalog, chatState.nextSkillId);
+  if (chatState.nextSkillId !== normalizedNextSkillId) shouldSave = true;
+  chatState.nextSkillId = normalizedNextSkillId;
+  if (!Array.isArray(chatState.snapshots)) chatState.snapshots = [];
+  if (!Array.isArray(chatState.lastOperationLogs)) chatState.lastOperationLogs = [];
+  const sanitizedCurrentPayload = sanitizeSnapshotPayload(chatState);
   if (
     chatState.lastAttemptedSignature !== sanitizedCurrentPayload.lastAttemptedSignature ||
     chatState.lastProcessedSignature !== sanitizedCurrentPayload.lastProcessedSignature ||
@@ -1002,17 +1488,56 @@ export function getChatState(ctx, settings) {
       if (item?.profile && !Array.isArray(item.profile.diary)) item.profile.diary = []
     }
   }
-  return chatState
+  // A pending sidecar may contain old data: never seed or save its blank placeholder.
+  if (isHostChatStateConfirmed(ctx) && getHostChatId(ctx)) {
+    const seed = importCardSkillSeed(ctx, settings, chatState);
+    if (seed.applied || seed.processed) {
+      recordChatStateSnapshot(ctx, chatState, { reason: 'card_skill_seed' });
+      saveSettings(ctx);
+      if (seed.applied) globalThis.toastr?.info?.(`已从角色卡带入 ${seed.created} 个技能。`);
+    }
+  }
+  return chatState;
 }
+
+/**
+ * 存档结构升版：角色与每一层楼层快照都要迁移，否则回溯楼层会把旧结构带回来。
+ * 快照是差异链，逐层还原成完整内容、迁移后再按原本的中继资料重新串回去。
+ */
+function migrateChatStateSchema(chatState) {
+  const fromVersion = getChatStateSchemaVersion(chatState);
+  if (fromVersion >= CHAT_STATE_SCHEMA_VERSION) return false;
+  // Existing chats (including empty ones) must not acquire author seeds on upgrade.
+  if (fromVersion < 6) chatState.cardSkillSeedApplied = true;
+  migrateCharacters(chatState.characters, fromVersion, { minutesPassed: Number(chatState.minutesPassed) || 0 });
+  if (Array.isArray(chatState.snapshots) && chatState.snapshots.length > 0) {
+    const source = chatState.snapshots;
+    const cache = new Map();
+    const rebuiltCache = new Map();
+    const rebuilt = [];
+    for (let index = 0; index < source.length; index += 1) {
+      const payload = materializeSnapshotPayloadAt(source, index, cache);
+      if (fromVersion < 6) payload.cardSkillSeedApplied = true;
+      const characters = unpackSnapshotCharacters(payload.characters, false, true);
+      migrateCharacters(characters, fromVersion, { minutesPassed: Number(payload.minutesPassed) || 0 });
+      rebuilt.push(createStoredSnapshotState(rebuilt, { ...payload, characters: packSnapshotCharacters(characters) }, source[index], rebuiltCache));
+    }
+    chatState.snapshots = rebuilt;
+  }
+  chatState.schemaVersion = CHAT_STATE_SCHEMA_VERSION;
+  return true;
+}
+
 export function isChatStateEffectivelyEmpty(chatState) {
-  if (!chatState || typeof chatState !== 'object') return true
-  const hasCharacters = Object.keys(chatState.characters || {}).length > 0
-  const hasSkillCatalog = Array.isArray(chatState.skillCatalog) && chatState.skillCatalog.length > 0
-  const hasConsumedSkillIds = Number(chatState.nextSkillId) > 1
-  const hasSnapshots = Array.isArray(chatState.snapshots) && chatState.snapshots.length > 0
-  const hasSceneSummary = Boolean(String(chatState.sceneSummary || '').trim())
-  const hasMinutesPassed = Number(chatState.minutesPassed) > 0
-  return !(hasCharacters || hasSkillCatalog || hasConsumedSkillIds || hasSnapshots || hasSceneSummary || hasMinutesPassed)
+  if (!chatState || typeof chatState !== 'object') return true;
+  const hasCharacters = Object.keys(chatState.characters || {}).length > 0;
+  const hasSkillCatalog = Array.isArray(chatState.skillCatalog) && chatState.skillCatalog.length > 0;
+  const hasSkillBaseline = Boolean(String(chatState.skillBaselinePrompt || '').trim());
+  const hasConsumedSkillIds = Number(chatState.nextSkillId) > 1;
+  const hasSnapshots = Array.isArray(chatState.snapshots) && chatState.snapshots.length > 0;
+  const hasSceneSummary = Boolean(String(chatState.sceneSummary || '').trim());
+  const hasMinutesPassed = Number(chatState.minutesPassed) > 0;
+  return !(hasCharacters || hasSkillCatalog || hasSkillBaseline || hasConsumedSkillIds || hasSnapshots || hasSceneSummary || hasMinutesPassed || chatState.cardSkillSeedApplied === true);
 }
 export function inheritChatStateFromMatchingChat(ctx, settings) {
   const chatKey = getChatKey(ctx)
@@ -1059,6 +1584,24 @@ export function inheritChatStateFromMatchingChat(ctx, settings) {
     fromChatKey: bestMatch.candidateKey,
     messageCount: bestMatch.count,
   }
+}
+/**
+ * 世界书过滤后要送给模型的形状：只挑书名与通过筛选的条目，重新组一个新物件。
+ * 不能用 {...book} 展开原物件——SillyTavern 载入的世界书带着 originalData（完整的原始条目），
+ * 展开会把被排除的条目连同整本书原封不动带进请求。认不得的形状一律不送，宁可少送也不整本外泄。
+ */
+export function projectWorldbook(value, keepEntry) {
+  if (!value || typeof value !== 'object') return null;
+  if (Array.isArray(value)) return value.filter(keepEntry);
+  const nested = value.worldBook && typeof value.worldBook === 'object' ? value.worldBook : null;
+  const source = value.entries ?? nested?.entries;
+  const rawName = typeof value.name === 'string' ? value.name : nested?.name;
+  const named = typeof rawName === 'string' && rawName.trim() ? { name: rawName } : {};
+  if (Array.isArray(source)) return { ...named, entries: source.filter(keepEntry) };
+  if (source && typeof source === 'object') {
+    return { ...named, entries: Object.fromEntries(Object.entries(source).filter(([, entry]) => keepEntry(entry))) };
+  }
+  return null;
 }
 function hasWorldBookEntries(value) {
   if (!value || typeof value !== 'object') return false
@@ -1387,17 +1930,19 @@ export function resolveRegisteredCharacterName(chatState, targetName, options = 
   }
   return ''
 }
-export function buildRecentMessages(ctx, settings, endIndexExclusive = null) {
+export function buildRecentMessages(ctx, settings, endIndexExclusive = null, settledBefore = null) {
   const count = Math.max(2, Number(settings.contextSize) || 12)
   const chat = getHostChat(ctx)
   const end = Number.isInteger(endIndexExclusive) ? Math.max(0, Math.min(chat.length, endIndexExclusive)) : chat.length
-  return chat.slice(Math.max(0, end - count), end).map(message => {
+  const start = Math.max(0, end - count)
+  return chat.slice(start, end).map((message, offset) => {
     const rawText = String(message?.mes || '')
     const processed = processHistoryText(rawText, settings?.historyRegexRules || [])
     return {
       name: message.name || (message.is_user ? ctx.name1 : ctx.name2) || '',
       role: message.is_user ? 'user' : 'assistant',
       text: processed.text,
+      ...(Number.isInteger(settledBefore) && start + offset < settledBefore ? { already_settled: true } : {}),
     }
   })
 }
@@ -1484,6 +2029,7 @@ function createSnapshotCharacterBaseline(name = '') {
     name: String(name || '').trim(),
     initialized: false,
     profile: {
+      visualCue: null,
       cooldown: {
         orgasmOvulationUsed: false,
         naturalOvulationUsed: false,
@@ -1497,6 +2043,8 @@ function createSnapshotCharacterBaseline(name = '') {
         days: 0,
         fertilizationDays: 0,
         latestSexDays: null,
+        penetrationState: 'idle',
+        penetrationSource: null,
         age: 15,
         stage: null,
         race: '人类',
@@ -1510,6 +2058,7 @@ function createSnapshotCharacterBaseline(name = '') {
         psyStress: getPsyStressInitByLevel(4),
         vitalityLevel: 4,
         psyStressLevel: 4,
+        uterineAtony: 0,
       },
       pregnant: {
         pregnantDays: 0,
@@ -1517,16 +2066,17 @@ function createSnapshotCharacterBaseline(name = '') {
         laborHours: 0,
         effectiveLaborHours: 0,
         laborPhase: null,
-        laborFetusIndex: 0,
+        laborBirthNumber: 0,
+        deliveredCount: 0,
+        extensionCount: 0,
+        extensionUntilDays: null,
+        presentingEmbryoId: null,
         laborPain: 0,
         prodromalOriginStage: null,
         prodromalRemainingHours: 0,
         prodromalDelayProgressHours: 0,
         fetusesCount: 0,
         fetalEnergyDrain: 0,
-        amnionDurability: 0,
-        nutrition: 0,
-        symptomReliefPending: 0,
         blockage: null,
         acceleration: null,
         expansion: null,
@@ -1535,18 +2085,20 @@ function createSnapshotCharacterBaseline(name = '') {
       experience: {
         virginity: null,
         latestSexPartner: null,
-        emotionalMate: null,
-        marriageMate: null,
+        emotionalMates: [],
+        marriageMates: [],
         pregnantExperience: 0,
         naturalBirthExperience: 0,
         surgicalBirthExperience: 0,
         miscarriageExperience: 0,
+        abortionExperience: 0,
       },
       psychology: {
         mens: buildEmptyPsychologyGroup(PSY_MENS_FIELDS, PSY_MENS_BOOL_FIELDS),
         preg: buildEmptyPsychologyGroup(PSY_PREG_FIELDS, PSY_PREG_BOOL_FIELDS),
         stageProfiles: {},
       },
+      cognitionRecords: [],
       children: [],
       skills: [],
       talents: [],
@@ -1576,8 +2128,19 @@ function createSnapshotCharacterBaseline(name = '') {
         companionship: 0,
       },
       descriptions: {
-        normalDescription: '',
-        pregnantDescription: '',
+        normalDescription: [],
+        pregnantDescription: [],
+      },
+      wardrobe: {
+        enabled: true,
+        items: [createDefaultWardrobeItem()],
+      },
+      outfit: {
+        mainItemId: null,
+        accessoryItemIds: [],
+        transientItems: [],
+        wearState: DEFAULT_WEAR_STATE,
+        pregFit: null,
       },
       notify: {
         firstly: '',
@@ -1606,22 +2169,28 @@ function compactSnapshotArrayEntries(list) {
   return list.filter(item => item && typeof item === 'object').map(item => compactSnapshotRecord(item))
 }
 function normalizeCharacterForSnapshot(character, name = '') {
-  const next = cloneValue(character || {})
-  next.name = String(next.name || name || '').trim()
-  next.initialized = Boolean(next.initialized)
-  next.profile = next.profile && typeof next.profile === 'object' ? next.profile : {}
-  next.profile.psychology = normalizePsychologyState(next.profile.psychology)
-  next.profile.base = next.profile.base && typeof next.profile.base === 'object' ? next.profile.base : {}
-  next.profile.pregnant = next.profile.pregnant && typeof next.profile.pregnant === 'object' ? next.profile.pregnant : {}
-  next.profile.children = compactSnapshotArrayEntries(next.profile.children)
-  next.profile.diary = compactSnapshotArrayEntries(next.profile.diary)
-  next.profile.pregnant.fetuses = compactSnapshotArrayEntries(next.profile.pregnant.fetuses)
-  next.profile.base.sperms = compactSnapshotArrayEntries(next.profile.base.sperms)
-  next.profile.descriptions = compactSnapshotRecord(next.profile.descriptions || {})
-  next.profile.notify = compactSnapshotRecord(next.profile.notify || {})
-  delete next.updatedAt
-  delete next.runtime
-  return next
+  const next = cloneValue(character || {});
+  next.name = String(next.name || name || '').trim();
+  next.initialized = Boolean(next.initialized);
+  next.profile = next.profile && typeof next.profile === 'object' ? next.profile : {};
+  next.profile.psychology = normalizePsychologyState(next.profile.psychology);
+  next.profile.base = next.profile.base && typeof next.profile.base === 'object' ? next.profile.base : {};
+  next.profile.pregnant = next.profile.pregnant && typeof next.profile.pregnant === 'object' ? next.profile.pregnant : {};
+  next.profile.children = compactSnapshotArrayEntries(next.profile.children);
+  next.profile.diary = compactSnapshotArrayEntries(next.profile.diary);
+  next.profile.pregnant.fetuses = compactSnapshotArrayEntries(next.profile.pregnant.fetuses);
+  next.profile.base.sperms = compactSnapshotArrayEntries(next.profile.base.sperms);
+  next.profile.descriptions = compactSnapshotRecord(next.profile.descriptions || {});
+  next.profile.notify = compactSnapshotRecord(next.profile.notify || {});
+  delete next.updatedAt;
+  // runtime 其余是时间进位之类的暂态，不进快照；孕前原值例外：
+  // 回溯楼层后少了它，分娩时会把孕期调整过的耐受当成原值还原回去，永久偏掉
+  const originalPregnancyBio = next.runtime?.originalPregnancyBio;
+  delete next.runtime;
+  if (originalPregnancyBio && typeof originalPregnancyBio === 'object') {
+    next.runtime = { originalPregnancyBio };
+  }
+  return next;
 }
 function packSnapshotCharacters(characters) {
   const source = characters && typeof characters === 'object' ? characters : {}
@@ -1634,17 +2203,25 @@ function packSnapshotCharacters(characters) {
   }
   return packed
 }
-function unpackSnapshotCharacters(characters, format = '') {
-  if (!characters || typeof characters !== 'object') return {}
-  const unpacked = {}
+/** 快照里的角色一律存成「相对预设角色的差异」（default_delta_v1），这里还原 */
+function unpackSnapshotCharacters(characters, normalize = true, legacy = false) {
+  if (!characters || typeof characters !== 'object') return {};
+  const format = typeof normalize === 'string' ? normalize : 'default_delta_v1';
+  const shouldNormalize = typeof normalize === 'boolean' ? normalize : true;
+  const unpacked = {};
   for (const [name, item] of Object.entries(characters)) {
-    if (format === 'default_delta_v1') {
-      const baseline = createSnapshotCharacterBaseline(name)
-      const restored = applyStateDeltaPatch(baseline, item && typeof item === 'object' ? item : {})
-      unpacked[name] = normalizeCharacterPsychologyState(restored)
-      continue
+    if (format !== 'default_delta_v1') {
+      unpacked[name] = shouldNormalize ? normalizeCharacterPsychologyState(cloneValue(item)) : cloneValue(item);
+      continue;
     }
-    unpacked[name] = normalizeCharacterPsychologyState(cloneValue(item))
+    const baseline = createSnapshotCharacterBaseline(name);
+    if (legacy) {
+      for (const key of ['emotionalMates', 'marriageMates', 'unclassifiedLossExperience', 'abortionExperience']) delete baseline.profile.experience[key];
+      baseline.profile.experience.emotionalMate = null;
+      baseline.profile.experience.marriageMate = null;
+    }
+    const restored = applyStateDeltaPatch(baseline, item && typeof item === 'object' ? item : {});
+    unpacked[name] = shouldNormalize ? normalizeCharacterPsychologyState(restored) : restored;
   }
   return unpacked
 }
@@ -1652,8 +2229,10 @@ function exportChatStateSnapshotPayload(chatState) {
   return {
     snapshotSchema: 'packed_v2',
     charactersFormat: 'default_delta_v1',
+    skillBaselinePrompt: String(chatState.skillBaselinePrompt || ''),
     skillCatalog: normalizeSkillCatalog(chatState.skillCatalog),
     nextSkillId: normalizeNextSkillId(chatState.skillCatalog, chatState.nextSkillId),
+    cardSkillSeedApplied: chatState.cardSkillSeedApplied === true,
     lastAttemptedSignature: sanitizeStoredSignature(chatState.lastAttemptedSignature),
     lastProcessedSignature: sanitizeStoredSignature(chatState.lastProcessedSignature),
     lastRunAt: chatState.lastRunAt || 0,
@@ -1827,6 +2406,12 @@ function trimChatStateSnapshots(chatState) {
       boundarySignature: String(chatState.snapshots[0].boundarySignature || ''),
       reason: String(chatState.snapshots[0].reason || 'state'),
       createdAt: Number(chatState.snapshots[0].createdAt || Date.now()),
+      anchorVersion: Number(chatState.snapshots[0].anchorVersion) || 0,
+      tailMessageId: String(chatState.snapshots[0].tailMessageId || ''),
+      tailSwipeId: String(chatState.snapshots[0].tailSwipeId || ''),
+      tailName: String(chatState.snapshots[0].tailName || ''),
+      hostMutSeq: Number.isFinite(Number(chatState.snapshots[0].hostMutSeq)) ? Number(chatState.snapshots[0].hostMutSeq) : -1,
+      replacementStamp: Number.isFinite(Number(chatState.snapshots[0].replacementStamp)) ? Number(chatState.snapshots[0].replacementStamp) : 0,
       snapshotMode: 'full',
       stateSnapshot: materializedFirstPayload,
     }
@@ -1871,7 +2456,16 @@ function createStoredSnapshotState(snapshots, payload, metadata = {}, cache = ne
     boundarySignature: String(metadata.boundarySignature || ''),
     reason: String(metadata.reason || 'state'),
     createdAt: Number(metadata.createdAt || Date.now()),
-  }
+    // 靜默正文替換識別錨點（anchorVersion 1）：記錄邊界樓層的身分、「當時的編輯
+    // 事件計數」與「當時已見的替換戳值」。舊快照沒有這些欄位（anchorVersion 0）
+    // → 永遠走原本的判定，零回歸。
+    anchorVersion: Number(metadata.anchorVersion) || 0,
+    tailMessageId: metadata.tailMessageId === undefined || metadata.tailMessageId === null ? '' : String(metadata.tailMessageId),
+    tailSwipeId: metadata.tailSwipeId === undefined || metadata.tailSwipeId === null ? '' : String(metadata.tailSwipeId),
+    tailName: metadata.tailName === undefined || metadata.tailName === null ? '' : String(metadata.tailName),
+    hostMutSeq: Number.isFinite(Number(metadata.hostMutSeq)) ? Number(metadata.hostMutSeq) : -1,
+    replacementStamp: Number.isFinite(Number(metadata.replacementStamp)) ? Number(metadata.replacementStamp) : 0,
+  };
   if (shouldStoreFullSnapshot(snapshotIndex, normalizedPayload, deltaPatch)) {
     return {
       ...baseRecord,
@@ -2084,8 +2678,10 @@ export function restoreChatStateFromSnapshot(chatState, snapshot) {
   chatState.lastRunAt = payload.lastRunAt || 0
   chatState.sceneSummary = payload.sceneSummary || ''
   chatState.minutesPassed = payload.minutesPassed || 0
+  if (payload.skillBaselinePrompt !== undefined) chatState.skillBaselinePrompt = String(payload.skillBaselinePrompt || '')
   if (payload.skillCatalog !== undefined) chatState.skillCatalog = normalizeSkillCatalog(payload.skillCatalog)
   if (payload.nextSkillId !== undefined) chatState.nextSkillId = normalizeNextSkillId(chatState.skillCatalog, payload.nextSkillId)
+  if (payload.cardSkillSeedApplied !== undefined) chatState.cardSkillSeedApplied = payload.cardSkillSeedApplied === true
   chatState.characters = unpackSnapshotCharacters(payload.characters, payload.charactersFormat || '')
   chatState.lastRawResult = payload.lastRawResult || null
   chatState.lastOperationLogs = Array.isArray(payload.lastOperationLogs) ? payload.lastOperationLogs : []
@@ -2124,6 +2720,47 @@ export function getLatestMatchingSnapshotBefore(ctx, chatState, messageCount) {
   }
   return null
 }
+
+// ---- 状态回溯（唯读） ----
+// 楼层快照本来就为了重抽、删楼时对账而保存（最近 MAX_CHAT_STATE_SNAPSHOTS 份）。
+// 以下函数只把快照还原成复本给介面查看，不改动任何状态，也不会触发回滚。
+
+/** 快照清单，最新的排最前面 */
+export function listChatStateSnapshots(chatState) {
+  const snapshots = Array.isArray(chatState?.snapshots) ? chatState.snapshots : [];
+  return snapshots.map((snapshot, index) => ({
+    index,
+    messageCount: Number.isInteger(snapshot?.messageCount) ? snapshot.messageCount : 0,
+    reason: String(snapshot?.reason || 'state'),
+    createdAt: Number(snapshot?.createdAt) || 0,
+  })).reverse();
+}
+
+/** 某份快照当时某个角色的完整状态（复本）；那时还没有这个角色则回传 null */
+export function getSnapshotCharacter(chatState, index, name) {
+  const snapshots = Array.isArray(chatState?.snapshots) ? chatState.snapshots : [];
+  if (!Number.isInteger(index) || index < 0 || index >= snapshots.length) return null;
+  const payload = materializeSnapshotPayloadAt(snapshots, index);
+  const characters = unpackSnapshotCharacters(payload.characters);
+  const character = characters?.[name];
+  return character ? cloneValue(character) : null;
+}
+
+/** 逐栏位比对两份状态，回传有变化的叶节点 { path, before, after }；阵列以索引为路径 */
+export function diffStateValues(before, after, prefix = '') {
+  const isContainer = (value) => value !== null && typeof value === 'object';
+  if (!isContainer(before) || !isContainer(after) || Array.isArray(before) !== Array.isArray(after)) {
+    return JSON.stringify(before) === JSON.stringify(after) ? [] : [{ path: prefix || '(整体)', before, after }];
+  }
+  const keys = [...new Set([...Object.keys(before), ...Object.keys(after)])];
+  const changes = [];
+  for (const key of keys) {
+    const path = prefix ? (Array.isArray(before) ? `${prefix}[${key}]` : `${prefix}.${key}`) : key;
+    changes.push(...diffStateValues(before[key], after[key], path));
+  }
+  return changes;
+}
+
 export function restoreChatStateAfterReplayFailure(chatState, replayContext) {
   if (!Array.isArray(replayContext?.previousSnapshots)) return false
   chatState.snapshots = replayContext.previousSnapshots
@@ -2144,6 +2781,12 @@ export function recordChatStateSnapshot(ctx, chatState, options = {}) {
     boundarySignature: buildBoundaryMessageSignature(ctx, messageCount),
     reason: String(options.reason || 'state'),
     createdAt: Date.now(),
+    anchorVersion: options.anchorVersion,
+    tailMessageId: options.tailMessageId,
+    tailSwipeId: options.tailSwipeId,
+    tailName: options.tailName,
+    hostMutSeq: options.hostMutSeq,
+    replacementStamp: options.replacementStamp,
   })
   chatState.snapshots.push(snapshot)
   trimChatStateSnapshots(chatState)
@@ -2185,11 +2828,12 @@ export function buildSignature(ctx, endIndexExclusive = null) {
     hashStringFNV1a(content, MESSAGE_DIGEST_SEED).toString(16).padStart(8, '0'),
   ].join('|')
 }
-export function shouldTriggerForMessage(settings, lastMessage) {
-  if (!lastMessage) return false
-  if (settings.triggerTiming === 'after_ai') return !lastMessage.is_user
-  if (settings.triggerTiming === 'after_user') return !!lastMessage.is_user
-  return false
+/**
+ * 自动追踪只在 AI 回复定稿后进行。旧版另有 after_user（使用者一送出就追踪），但那时主线已经组好提示、
+ * 正在生成：追踪结果赶不上这一轮，AI 这轮写的事也要等下次送出才被记录，还会与主线复制、MVU 解析抢时序
+ */
+export function shouldTriggerForMessage(lastMessage) {
+  return Boolean(lastMessage) && !lastMessage.is_user;
 }
 export function formatStatusText(chatState) {
   const lines = []

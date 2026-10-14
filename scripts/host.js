@@ -1,11 +1,20 @@
+import { trackSidecarWrite } from './save_sync.js';
+
 const EMPTY_LIST = Object.freeze([]);
 const HOST_CHAT_VIEW_CACHE = new WeakMap();
-const HOST_STABLE_CHAT_ID_CACHE = new WeakMap();
+// 以 fallback id 为键而非 ctx：宿主 getContext() 每次都回新物件，
+// 按 ctx 缓存的话自取 ctx 的渲染路径会退回 fallback key，读到空的聊天状态。
+const HOST_STABLE_CHAT_ID_CACHE = new Map();
 const TAURI_HISTORY_PAGE_SIZE = 200;
 const TAURI_STATE_NAMESPACE = 'bs-biotracker';
 const TAURI_STATE_KEY = 'chat-state-v1';
-const TAURI_STATE_SAVE_DELAY_MS = 250;
+// 只合并 0.05 秒内的连续存档：拖得越久，页面在写入前刷新就丢得越多（离开确认框跳出时页面脚本是暂停的，补存送不出去）
+const TAURI_STATE_SAVE_DELAY_MS = 50;
 const TAURI_STATE_SAVE_QUEUE = new Map();
+// 同一聊天的 sidecar 写入必须严格按发起顺序完成。只取消尚未开始的防抖计时器
+// 不够：较旧的 setJson/updateChatState 若已在飞，仍可能晚于新写入完成，把刚删除
+// 的角色资料覆盖回来。
+const TAURI_STATE_WRITE_CHAIN = new Map();
 const TAURI_STATE_KNOWN_MISSING_IDS = new Set();
 const TAURI_STATE_LOAD_INFLIGHT = new Map();
 // 已经确认过存档内容（读到了资料，或确认过没有存档）的聊天。
@@ -13,6 +22,7 @@ const TAURI_STATE_LOAD_INFLIGHT = new Map();
 const TAURI_STATE_HYDRATED_IDS = new Set();
 const TAURI_HANDLE_WAIT_TIMEOUT_MS = 3000;
 const TAURI_HANDLE_WAIT_INTERVAL_MS = 100;
+let SILLYTAVERN_SCRIPT_MODULE_PROMISE = null;
 const HOST_EVENT_TYPE_KEYS = Object.freeze({
   appReady: 'APP_READY',
   chatChanged: 'CHAT_CHANGED',
@@ -20,6 +30,8 @@ const HOST_EVENT_TYPE_KEYS = Object.freeze({
   chatDeleted: 'CHAT_DELETED',
   groupChatCreated: 'GROUP_CHAT_CREATED',
   groupChatDeleted: 'GROUP_CHAT_DELETED',
+  settingsUpdated: 'SETTINGS_UPDATED',
+  worldInfoEntriesLoaded: 'WORLDINFO_ENTRIES_LOADED',
 });
 
 export function getHostKind() {
@@ -78,7 +90,9 @@ export function subscribeHostEvent(ctx, eventName, handler) {
   return () => {
     if (!active) return;
     active = false;
+    // SillyTavern 的 EventEmitter 只有 removeListener，没有 off
     if (typeof eventSource.off === 'function') eventSource.off(eventType, safeHandler);
+    else if (typeof eventSource.removeListener === 'function') eventSource.removeListener(eventType, safeHandler);
   };
 }
 
@@ -156,11 +170,33 @@ export function getHostCharacters(ctx) {
   return Array.isArray(ctx?.characters) ? ctx.characters : EMPTY_LIST;
 }
 
+/**
+ * 聊天删除事件里被删的是哪个聊天。SillyTavern 传的是聊天档名字串（不含 .jsonl），
+ * 其他宿主可能包成物件。认不出来就回空字串、不清任何资料：以前退回「目前开着的聊天」，
+ * 结果删掉别的聊天时，正在玩的这个聊天的追踪状态被整个清空。
+ */
+export function extractDeletedChatKey(payload) {
+  if (typeof payload === 'string') return payload.replace(/\.jsonl$/i, '').trim();
+  const candidates = [
+    payload?.chatId,
+    payload?.chat_id,
+    payload?.id,
+    payload?.data?.chatId,
+    payload?.data?.chat_id,
+    payload?.data?.id,
+  ];
+  for (const candidate of candidates) {
+    const value = String(candidate || '').trim();
+    if (value) return value;
+  }
+  return '';
+}
+
 export function getHostChatId(ctx) {
   const fallbackId = getFallbackHostChatId(ctx);
   if (getHostKind() === 'tauritavern') {
-    const cached = ctx && typeof ctx === 'object' ? HOST_STABLE_CHAT_ID_CACHE.get(ctx) : null;
-    if (cached?.fallbackId === fallbackId && cached.stableId) return cached.stableId;
+    const stableId = HOST_STABLE_CHAT_ID_CACHE.get(fallbackId);
+    if (stableId) return stableId;
   }
   return fallbackId;
 }
@@ -178,11 +214,19 @@ function getFallbackHostChatId(ctx) {
   return `${ctx?.characterId ?? 'char'}:${ctx?.groupId ?? 'solo'}`;
 }
 
+/** 临时键的样子：角色索引或 char，冒号后接 solo 或群组 id（ST 群组 id 是时间戳数字） */
+export const PLACEHOLDER_CHAT_KEY_PATTERN = /^(?:\d+|char):(?:solo|\d+)$/;
+
+/** 宿主还没给聊天 id 时的临时键（角色索引:群组）；切卡瞬间常见，不能当成一个真的聊天 */
+export function isPlaceholderHostChatId(ctx, chatId = getHostChatId(ctx)) {
+  return chatId === `${ctx?.characterId ?? 'char'}:${ctx?.groupId ?? 'solo'}`;
+}
+
 export async function resolveHostChatId(ctx) {
   const fallbackId = getFallbackHostChatId(ctx);
   if (getHostKind() !== 'tauritavern') return fallbackId;
-  const cached = ctx && typeof ctx === 'object' ? HOST_STABLE_CHAT_ID_CACHE.get(ctx) : null;
-  if (cached?.fallbackId === fallbackId && cached.stableId) return cached.stableId;
+  const cached = HOST_STABLE_CHAT_ID_CACHE.get(fallbackId);
+  if (cached) return cached;
   const ready = globalThis.__TAURITAVERN__?.ready || globalThis.__TAURITAVERN_MAIN_READY__;
   if (ready && typeof ready.then === 'function') await ready;
   const handle = getCurrentTauriChatHandle();
@@ -190,7 +234,7 @@ export async function resolveHostChatId(ctx) {
   try {
     const stableId = String(await handle.stableId() || '').trim();
     if (!stableId) return fallbackId;
-    if (ctx && typeof ctx === 'object') HOST_STABLE_CHAT_ID_CACHE.set(ctx, { fallbackId, stableId });
+    HOST_STABLE_CHAT_ID_CACHE.set(fallbackId, stableId);
     return stableId;
   } catch (error) {
     console.warn('[BS BioTracker] unable to resolve TauriTavern stable chat id', error);
@@ -209,6 +253,57 @@ export function saveHostSettings(ctx) {
     ctx?.saveSettingsDebounced?.();
   } catch (error) {
     console.warn('[BS BioTracker] unable to save host settings', error);
+  }
+}
+
+async function loadSillyTavernScriptModule() {
+  if (!SILLYTAVERN_SCRIPT_MODULE_PROMISE) {
+    // host.js 位于 public/scripts/extensions/third-party/<extension>/scripts。
+    // 动态载入避免 TT／Luker 在启动时解析原版 ST 专用模组。
+    SILLYTAVERN_SCRIPT_MODULE_PROMISE = import('../../../../../script.js').catch((error) => {
+      SILLYTAVERN_SCRIPT_MODULE_PROMISE = null;
+      throw error;
+    });
+  }
+  return SILLYTAVERN_SCRIPT_MODULE_PROMISE;
+}
+
+/**
+ * 原生 SillyTavern 的 saveSettingsDebounced 有约一秒等待窗；删除后立刻换页或重载时，
+ * 计时器可能尚未执行。破坏性操作改用 ST 导出的 saveSettings，并等待请求结束。
+ * ctx.saveSettings 是向前相容与测试入口；当前官方 context 未公开时动态载入 script.js。
+ */
+export async function saveHostSettingsImmediately(ctx) {
+  if (getHostKind() !== 'sillytavern') return;
+  try {
+    if (typeof ctx?.saveSettings === 'function') {
+      await ctx.saveSettings();
+      return;
+    }
+    const module = await loadSillyTavernScriptModule();
+    if (typeof module?.saveSettings !== 'function') {
+      throw new Error('SillyTavern saveSettings is unavailable');
+    }
+    // ST 的 saveSettings 会自行捕获 fetch 错误，因此用成功事件确认这次写入。
+    const savedEvent = module?.event_types?.SETTINGS_UPDATED;
+    const eventSource = module?.eventSource;
+    const canConfirmSave = Boolean(savedEvent && typeof eventSource?.on === 'function');
+    let didSave = false;
+    const markSaved = () => { didSave = true; };
+    if (canConfirmSave) eventSource.on(savedEvent, markSaved);
+    try {
+      await module.saveSettings();
+    } finally {
+      if (canConfirmSave && typeof eventSource?.off === 'function') {
+        eventSource.off(savedEvent, markSaved);
+      }
+    }
+    if (canConfirmSave && !didSave) {
+      throw new Error('SillyTavern settings save did not complete successfully');
+    }
+  } catch (error) {
+    console.warn('[BS BioTracker] unable to save SillyTavern settings immediately', error);
+    throw error;
   }
 }
 
@@ -234,9 +329,10 @@ export async function getHostWorldBook(name, scope = 'global') {
   return result?.worldBook || null;
 }
 
-export async function getHostWorldInfoPrompt(ctx, chat, maxContext, includeNames = true) {
+/** chat 要是宿主扫描用的字串阵列（见 api.js 的 buildWorldInfoScanChat）；第三个参数是 isDryRun */
+export async function getHostWorldInfoPrompt(ctx, chat, maxContext, isDryRun = true) {
   if (typeof ctx?.getWorldInfoPrompt !== 'function') return null;
-  return ctx.getWorldInfoPrompt(chat, maxContext, includeNames);
+  return ctx.getWorldInfoPrompt(chat, maxContext, isDryRun);
 }
 
 export function getHostPresetManager(ctx = null, apiId = 'openai') {
@@ -287,7 +383,9 @@ function cloneHostValue(value) {
 
 function getCurrentTauriChatHandle() {
   const api = getTauriTavernApi()?.chat;
-  return typeof api?.current?.handle === 'function' ? api.current.handle() : null;
+  if (typeof api?.current?.handle !== 'function') return null;
+  // TT 2.3 在还没开聊天（欢迎页）时直接抛错；没有聊天就没有句柄，不能让存设定跟着失败
+  try { return api.current.handle(); } catch { return null; }
 }
 
 /**
@@ -317,7 +415,8 @@ function isHostChatStateBlank(chatState) {
  */
 function shouldSkipBlankHostChatStateSave(chatId, chatState) {
   if (!isHostChatStateBlank(chatState)) return false;
-  return !TAURI_STATE_HYDRATED_IDS.has(chatId);
+  // 未确认：不能拿空的覆盖；确认过本来就没有存档：没有东西要清，不留空档案
+  return !TAURI_STATE_HYDRATED_IDS.has(chatId) || TAURI_STATE_KNOWN_MISSING_IDS.has(chatId);
 }
 
 /**
@@ -378,16 +477,29 @@ async function waitForTauriChatStoreHandle(timeoutMs = TAURI_HANDLE_WAIT_TIMEOUT
   return null;
 }
 
+// Luker 2.8 的 getChatState／updateChatState 回 {ok, state|reason, hint} 信封、失败不抛错；
+// 2.7 及更早直接回 payload。ok:false 当成读写失败抛出：读取失败不能当成「没有存档」去写空，写入失败不能当成已保存。
+function unwrapLukerStateResult(result) {
+  if (!result || typeof result !== 'object' || typeof result.ok !== 'boolean' || 'version' in result) return result;
+  if (!result.ok) throw new Error(`Luker chat state ${result.reason || 'error'}${result.hint ? `: ${result.hint}` : ''}`);
+  return result.state;
+}
+
 export async function loadHostChatState(ctx = null) {
   const hostKind = getHostKind();
   if (hostKind === 'luker') {
     const runtime = ctx || getHostContext();
     if (typeof runtime?.getChatState !== 'function') return null;
     try {
-      const stored = await runtime.getChatState(TAURI_STATE_NAMESPACE);
+      const stored = unwrapLukerStateResult(await runtime.getChatState(TAURI_STATE_NAMESPACE));
       // 读到了（无论有没有资料）就算确认过内容，之后才允许写空
-      TAURI_STATE_HYDRATED_IDS.add(getHostChatId(ctx));
-      if (stored?.version === 1 && stored.chatState && typeof stored.chatState === 'object') return cloneHostValue(stored.chatState);
+      const lukerChatId = getHostChatId(ctx);
+      TAURI_STATE_HYDRATED_IDS.add(lukerChatId);
+      if (stored?.version === 1 && stored.chatState && typeof stored.chatState === 'object') {
+        TAURI_STATE_KNOWN_MISSING_IDS.delete(lukerChatId);
+        return cloneHostValue(stored.chatState);
+      }
+      TAURI_STATE_KNOWN_MISSING_IDS.add(lukerChatId);
     } catch (error) {
       // 读取失败＝内容未知，保持未确认状态，避免拿空的覆盖掉
       console.warn('[BS BioTracker] unable to load Luker chat state', error);
@@ -444,51 +556,87 @@ export async function loadHostChatState(ctx = null) {
   }
 }
 
-export function scheduleHostChatStateSave(ctx, chatState) {
+function enqueueHostChatStateWrite(chatId, write) {
+  const previous = TAURI_STATE_WRITE_CHAIN.get(chatId) || Promise.resolve();
+  const current = previous.catch(() => {}).then(write);
+  TAURI_STATE_WRITE_CHAIN.set(chatId, current);
+  const cleanup = () => {
+    if (TAURI_STATE_WRITE_CHAIN.get(chatId) === current) TAURI_STATE_WRITE_CHAIN.delete(chatId);
+  };
+  void current.then(cleanup, cleanup);
+  return current;
+}
+
+function prepareHostChatStateSave(ctx, chatState) {
   const hostKind = getHostKind();
-  if (!chatState || typeof chatState !== 'object') return;
+  if (!chatState || typeof chatState !== 'object') return null;
   if (hostKind === 'luker') {
-    if (typeof ctx?.updateChatState !== 'function') return;
+    if (typeof ctx?.updateChatState !== 'function') return null;
     const chatId = getHostChatId(ctx);
-    if (shouldSkipBlankHostChatStateSave(chatId, chatState)) return;
-    const previous = TAURI_STATE_SAVE_QUEUE.get(chatId);
-    if (previous?.timer) clearTimeout(previous.timer);
+    if (shouldSkipBlankHostChatStateSave(chatId, chatState)) return null;
+    TAURI_STATE_KNOWN_MISSING_IDS.delete(chatId);
     const payload = { version: 1, chatState: cloneHostValue(chatState) };
-    const timer = setTimeout(async () => {
-      const queued = TAURI_STATE_SAVE_QUEUE.get(chatId);
-      if (!queued || queued.timer !== timer) return;
-      TAURI_STATE_SAVE_QUEUE.delete(chatId);
-      try {
-        await queued.ctx.updateChatState(TAURI_STATE_NAMESPACE, () => queued.payload);
-      } catch (error) {
-        console.warn('[BS BioTracker] unable to save Luker chat state', error);
-      }
-    }, TAURI_STATE_SAVE_DELAY_MS);
-    TAURI_STATE_SAVE_QUEUE.set(chatId, { ctx, payload, timer });
-    return;
+    return {
+      chatId,
+      hostKind,
+      write: async () => { unwrapLukerStateResult(await ctx.updateChatState(TAURI_STATE_NAMESPACE, () => payload)); },
+    };
   }
-  if (hostKind !== 'tauritavern') return;
+  if (hostKind !== 'tauritavern') return null;
   const handle = getCurrentTauriChatHandle();
-  if (typeof handle?.store?.setJson !== 'function') return;
+  if (typeof handle?.store?.setJson !== 'function') return null;
   const chatId = getHostChatId(ctx);
-  if (shouldSkipBlankHostChatStateSave(chatId, chatState)) return;
+  if (shouldSkipBlankHostChatStateSave(chatId, chatState)) return null;
   TAURI_STATE_KNOWN_MISSING_IDS.delete(chatId);
+  const payload = { version: 1, chatState: cloneHostValue(chatState) };
+  return {
+    chatId,
+    hostKind,
+    write: () => handle.store.setJson({
+      namespace: TAURI_STATE_NAMESPACE,
+      key: TAURI_STATE_KEY,
+      value: payload,
+    }),
+  };
+}
+
+function warnHostChatStateSaveFailure(entry, error) {
+  const hostName = entry?.hostKind === 'luker' ? 'Luker' : 'TauriTavern';
+  console.warn(`[BS BioTracker] unable to save ${hostName} chat state`, error);
+}
+
+/** onWritten：确实写进聊天旁档案后呼叫，用来通知其他分页同步 */
+export function scheduleHostChatStateSave(ctx, chatState, onWritten = null) {
+  const entry = prepareHostChatStateSave(ctx, chatState);
+  if (!entry) return;
+  const { chatId } = entry;
   const previous = TAURI_STATE_SAVE_QUEUE.get(chatId);
   if (previous?.timer) clearTimeout(previous.timer);
-  const payload = { version: 1, chatState: cloneHostValue(chatState) };
-  const timer = setTimeout(async () => {
+  const timer = setTimeout(() => {
     const queued = TAURI_STATE_SAVE_QUEUE.get(chatId);
     if (!queued || queued.timer !== timer) return;
     TAURI_STATE_SAVE_QUEUE.delete(chatId);
-    try {
-      await queued.handle.store.setJson({
-        namespace: TAURI_STATE_NAMESPACE,
-        key: TAURI_STATE_KEY,
-        value: queued.payload,
-      });
-    } catch (error) {
-      console.warn('[BS BioTracker] unable to save TauriTavern chat state', error);
-    }
+    trackSidecarWrite(enqueueHostChatStateWrite(chatId, queued.entry.write), queued.onWritten)
+      .catch((error) => warnHostChatStateSaveFailure(queued.entry, error));
   }, TAURI_STATE_SAVE_DELAY_MS);
-  TAURI_STATE_SAVE_QUEUE.set(chatId, { handle, payload, timer });
+  TAURI_STATE_SAVE_QUEUE.set(chatId, { entry, timer, onWritten });
+}
+
+/** 排程中、还没开始写的聊天旁存档数 */
+export function getQueuedHostChatStateSaveCount() {
+  return TAURI_STATE_SAVE_QUEUE.size;
+}
+
+/**
+ * 取消尚未开始的防抖保存，把当前状态排到同聊天既有写入之后，并等待真正落盘。
+ * 用于注销／清除等不能在写入完成前宣告成功的破坏性操作。
+ */
+export async function flushHostChatStateSave(ctx, chatState, onWritten = null) {
+  const entry = prepareHostChatStateSave(ctx, chatState);
+  if (!entry) return false;
+  const pending = TAURI_STATE_SAVE_QUEUE.get(entry.chatId);
+  if (pending?.timer) clearTimeout(pending.timer);
+  TAURI_STATE_SAVE_QUEUE.delete(entry.chatId);
+  await trackSidecarWrite(enqueueHostChatStateWrite(entry.chatId, entry.write), onWritten);
+  return true;
 }

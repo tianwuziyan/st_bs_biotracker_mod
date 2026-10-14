@@ -3,6 +3,7 @@
  * 只做资料整形，不产生 DOM，也不依赖任何宿主 API。
  */
 import { buildLineageGraph, focusLineage } from './lineage.js';
+import { formatBloodline } from './race_config.js';
 
 const GENERATION_LABELS = new Map([
   [-3, '曾祖辈'],
@@ -28,6 +29,37 @@ function raceLabel(race, derivedType) {
 }
 
 const EDGE_LABELS = { mother: '母', father: '父', carrier: '承载', rebirth: '前身' };
+
+/**
+ * 写实世界族谱的人生阶段：年龄未满门槛即属该段。少年从初潮（约 12 岁）起，
+ * 中年从更年期（约 45 岁）起。按显示的整数岁判定，与卡片上的岁数一致。
+ */
+export const LIFE_STAGE_AGE_BOUNDS = Object.freeze([
+  [3, '婴儿'],
+  [12, '孩童'],
+  [18, '少年'],
+  [45, '成人'],
+  [60, '中年'],
+  [Infinity, '长者'],
+]);
+
+/**
+ * 节点的人生阶段。未注册的人只有配子来源这层身分：当父方（含胎内回归的前身）是精方、
+ * 当遗传母方是卵方，两者都当过或都没有就判断不了；已注册角色与孩子按年龄分段，没有年龄也回 null，
+ * 由渲染层退回姓名首字。
+ */
+export function getLifeStage(kind, age, childRelations = []) {
+  if (kind === 'unregistered') {
+    const sire = childRelations.some((relation) => relation === '父' || relation === '前身');
+    const dam = childRelations.includes('母');
+    if (sire === dam) return null;
+    return sire ? '精方' : '卵方';
+  }
+  const value = Number(age);
+  if (age === null || age === undefined || age === '' || !Number.isFinite(value)) return null;
+  const years = Math.max(0, Math.round(value));
+  return LIFE_STAGE_AGE_BOUNDS.find(([limit]) => years < limit)[1];
+}
 
 /**
  * 年龄取整数岁，与追踪页概览同一套算法——同一个角色在两个画面显示不同岁数
@@ -70,6 +102,16 @@ export function buildLineageView(chatState, centerName, { up = 2, down = 2 } = {
   }
 
   const byId = new Map(focused.nodes.map((node) => [node.id, node]));
+  // 母方（卵源）血统：族谱图示平手时取母系占比较高的种族。用完整资料图找，母亲不在聚焦范围内也算；多位母源取平均
+  const graphById = new Map(graph.nodes.map((node) => [node.id, node]));
+  const motherBloodlineOf = (id) => {
+    const mothers = graph.edges.filter((edge) => edge.to === id && edge.type === 'mother')
+      .map((edge) => graphById.get(edge.from)?.bloodline).filter((value) => value && typeof value === 'object');
+    if (mothers.length === 0) return null;
+    const merged = {};
+    for (const bloodline of mothers) for (const [name, share] of Object.entries(bloodline)) merged[name] = (merged[name] || 0) + share / mothers.length;
+    return merged;
+  };
   // 无名的孩子也可能当亲代（孕中孕的母亲就是同胎的另一个孩子），
   // 没有 fallback 的话关系栏会印出原始节点 id
   const nameOf = (id) => {
@@ -111,14 +153,17 @@ export function buildLineageView(chatState, centerName, { up = 2, down = 2 } = {
       isCenter: node.id === centerId,
       displayName: node.name || '未命名',
       raceLabel: raceLabel(node.race, node.derivedType),
+      bloodlineLabel: formatBloodline(node.race, node.bloodline, node.bloodlineSource),
+      motherBloodline: motherBloodlineOf(node.id),
       ageLabel: ageLabel(node.age),
+      lifeStage: getLifeStage(node.kind, node.age, childrenOf.flatMap((item) => item.relations)),
       parents,
       geneticParents: parents.filter(isGenetic),
       carriers: parents.filter((item) => !isGenetic(item)),
       children: childrenOf,
       carriedChildren: childrenOf.filter((item) => !isGenetic(item)),
-      // 未注册的路人不能点进详情，没有可展开的资料
-      hasDetail: node.kind !== 'unregistered',
+      // 未注册的路人只有在子女记录带了父方快照（种族或体型）时才有资料可展开
+      hasDetail: node.kind !== 'unregistered' || Boolean(node.race) || typeof node.bodySize === 'number',
     };
   });
 

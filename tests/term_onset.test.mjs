@@ -1,0 +1,152 @@
+// 产科孕期曆与足月自然发动：37 周起宫压自行累积，满 42 周才算逾期
+import assert from 'node:assert/strict';
+import test from 'node:test';
+
+import * as state from '../scripts/state.js';
+import { applyToolCall, getLaborObstruction } from '../scripts/tools.js';
+import { DUE_DATE_DAYS, TERM_START_DAYS } from '../scripts/stage_config.js';
+import { applyRegistryResult } from '../scripts/registry.js';
+
+function carrier({ days = 252, weights = [1], readiness = 1, breedTolerance = 1, vitalityLevel = 5, psyStressLevel = 4, isHere = true, stage = '孕晚期', uterinePressure = 0, immune = {}, fetusOver = {} } = {}) {
+  const chatState = state.createEmptyChatState();
+  chatState.characters.A = {
+    name: 'A', initialized: true,
+    profile: {
+      base: {
+        stage, days: 0, isHere, age: 24, race: '人类',
+        vitality: 150, libido: 20, uterinePressure, psyStress: 30, vitalityLevel, psyStressLevel,
+        eggs: 0, sperms: [], fertilizationDays: 0, latestSexDays: -1,
+      },
+      bio: { birthDifficulty: 1, breedTolerance, impregnationDifficulty: 0.2, identicalProbability: 0 },
+      pregnant: {
+        pregnantDays: days, effectivePregnantDays: days, fetusesCount: weights.length, fetalEnergyDrain: 0,
+        ...(readiness === null ? {} : { termReadiness: { embryoId: 1, value: readiness } }),
+        fetuses: weights.map((weight, index) => ({
+          embryoId: index + 1, fathers: '甲', race: '人类', gender: '女', embryoType: '胎生', weight, tendencyAngle: 0, affinity: 0, ...fetusOver,
+        })),
+      },
+      experience: {}, immune, metabolism: {}, skills: [], talents: [], children: [], notify: {},
+    },
+  };
+  return chatState;
+}
+const P = (chatState) => chatState.characters.A.profile;
+const step = (chatState) => applyToolCall(chatState, { name: 'bsPassedTime', arguments: { day: 1 } });
+const runTo = (chatState, day) => { while (P(chatState).pregnant.effectivePregnantDays < day) step(chatState); };
+
+test('产科孕期曆：孕早期未满 14 周、孕晚期 28 周起、临产期 37～42 周、满 42 周才逾期', () => {
+  assert.equal(TERM_START_DAYS, 259);
+  assert.equal(DUE_DATE_DAYS, 280);
+  const stageAt = (days) => state.derivePregnancyStageState(days, 1).stage;
+  assert.equal(stageAt(97), '孕早期', '13 周 6 天仍是孕早期');
+  assert.equal(stageAt(99), '孕中期');
+  assert.equal(stageAt(195), '孕中期');
+  assert.equal(stageAt(197), '孕晚期');
+  assert.equal(stageAt(258), '孕晚期');
+  assert.equal(stageAt(260), '临产期');
+  assert.equal(stageAt(280), '临产期', '预产期落在临产期里');
+  assert.equal(stageAt(293), '临产期');
+  assert.equal(stageAt(295), '逾期');
+});
+
+test('37 周前宫压不会自己上升，足月后开始累积，满 42 周累积加倍', () => {
+  const chatState = carrier({ readiness: 0.55 });
+  runTo(chatState, TERM_START_DAYS);
+  assert.equal(P(chatState).base.uterinePressure, 0, '孕晚期不自行累积');
+
+  runTo(chatState, 287);
+  assert.equal(P(chatState).base.stage, '临产期');
+  const before = P(chatState).base.uterinePressure;
+  step(chatState);
+  const termDaily = P(chatState).base.uterinePressure - before;
+  assert.ok(termDaily > 0, '临产期每天都在累积');
+
+  runTo(chatState, 296);
+  assert.equal(P(chatState).base.stage, '逾期');
+  const overdueBefore = P(chatState).base.uterinePressure;
+  step(chatState);
+  const overdueDaily = P(chatState).base.uterinePressure - overdueBefore;
+  assert.ok(overdueDaily > termDaily * 1.8, '逾期后日增约为临产期的两倍');
+});
+
+test('不碰宫压时单胎会在足月自然进入产兆前驱，发动体质再低也不拖过 44 周', () => {
+  for (const readiness of [2.3, 0.5]) {
+    const chatState = carrier({ readiness });
+    for (let i = 0; i < 120 && !['产兆前驱', '第一产程'].includes(P(chatState).base.stage); i += 1) step(chatState);
+    const onsetDay = P(chatState).pregnant.effectivePregnantDays;
+    assert.equal(['产兆前驱', '第一产程'].includes(P(chatState).base.stage), true);
+    assert.ok(onsetDay >= TERM_START_DAYS && onsetDay < 308, `readiness ${readiness} 发动于第 ${onsetDay} 天`);
+  }
+});
+
+test('足月累积看肚子实际的量，不受母体承载耐受影响', () => {
+  const pressureAt = (breedTolerance) => {
+    const chatState = carrier({ readiness: 1, breedTolerance });
+    runTo(chatState, 270);
+    return P(chatState).base.uterinePressure;
+  };
+  // 胎重会随每周营养结算微调（那部分受耐受影响），累积公式本身不除耐受：差距只剩这点
+  const high = pressureAt(10);
+  const normal = pressureAt(1);
+  assert.ok(Math.abs(high - normal) / normal < 0.02, `耐受 10：${high}，耐受 1：${normal}`);
+});
+
+test('发动体质在抽的当下套上等级：病弱、极端情绪的母体偏早，其余不变', () => {
+  const realRandom = Math.random;
+  Math.random = () => 0.5;
+  try {
+    const rolled = (vitalityLevel, psyStressLevel) => {
+      const chatState = carrier({ readiness: null, vitalityLevel, psyStressLevel });
+      runTo(chatState, TERM_START_DAYS + 1);
+      return P(chatState).pregnant.termReadiness.value;
+    };
+    const normal = rolled(5, 4);
+    assert.ok(Math.abs(rolled(1, 4) / normal - 1.6) < 1e-9);
+    assert.ok(Math.abs(rolled(2, 7) / normal - 1.3 * 1.5) < 1e-9);
+    assert.equal(rolled(7, 1), normal, '强健与平稳不会让人晚生');
+  } finally {
+    Math.random = realRandom;
+  }
+});
+
+const inLabor = (chatState) => ['产兆前驱', '第一产程', '第二产程', '第三产程'].includes(P(chatState).base.stage);
+
+test('离场角色的足月宫压照样累积、过半即发动；再怎么压低也在 44 周前发动', () => {
+  const chatState = carrier({ isHere: false, readiness: 2.3 });
+  for (let i = 0; i < 80 && !inLabor(chatState); i += 1) step(chatState);
+  assert.equal(inLabor(chatState), true, '离场也会自然发动');
+  assert.ok(P(chatState).pregnant.effectivePregnantDays < 294);
+
+  // 旧存档：离场、卡在 50 周、宫压被压到 0
+  const stuck = carrier({ isHere: false, stage: '逾期', days: 350, readiness: 0.5, uterinePressure: 0 });
+  step(stuck);
+  assert.equal(inLabor(stuck), true, '超过期限的下一次推进就发动');
+});
+
+test('离场的真实分娩不判硬阻塞：横位领头的胎儿也会自己生完；回场后阻塞判定恢复', () => {
+  const offscreen = carrier({
+    isHere: false, stage: '逾期', days: 300, readiness: 0.5, uterinePressure: 0,
+    immune: { realisticLabor: true }, fetusOver: { tendencyAngle: 90 },
+  });
+  for (let i = 0; i < 60 && P(offscreen).children.length === 0; i += 1) step(offscreen);
+  assert.equal(P(offscreen).children.length, 1, '离场横位也生得出来');
+
+  // 同一个入口前的横位：在场是硬阻塞，离场不算
+  const transverseAtInlet = (isHere) => getLaborObstruction({
+    immune: { realisticLabor: true },
+    base: { stage: '第二产程', isHere },
+    pregnant: { presentingEmbryoId: 1, fetuses: [{ embryoId: 1, embryoType: '胎生', tendencyAngle: 90, descentStage: 0 }] },
+  });
+  assert.equal(transverseAtInlet(true)?.type, 'transverse');
+  assert.equal(transverseAtInlet(false), null);
+});
+
+test('重新注册带妊娠时丢掉旧的发动体质：胎儿编号会从 1 重编，不能沿用上一次的', () => {
+  const chatState = carrier({ readiness: 9 });
+  const reRegistered = applyRegistryResult(chatState, {
+    name: 'A',
+    profile: { base: { race: '人类' }, pregnant: { pregnantDays: 200, fetuses: [{ fathers: '乙', race: '人类', gender: '男' }] } },
+  });
+  assert.equal(reRegistered.profile.pregnant.fetuses[0].embryoId, 1);
+  assert.equal(reRegistered.profile.pregnant.termReadiness, undefined);
+});

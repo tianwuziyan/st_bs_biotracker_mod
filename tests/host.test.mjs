@@ -74,6 +74,20 @@ test('TauriTavern uses stableId and per-chat store without persisting chatStates
   assert.equal(saved?.chatState?.characters?.Alice?.initialized, true);
 });
 
+test('TauriTavern stable chat id survives a fresh getContext() object', async () => {
+  resetGlobals();
+  const handle = { stableId: async () => 'stable-chat-fresh-ctx' };
+  const makeCtx = () => ({ chatId: 'fallback-fresh-ctx', extensionSettings: {}, saveSettingsDebounced() {} });
+  globalThis.__TAURITAVERN__ = {
+    ready: Promise.resolve(),
+    api: { chat: { current: { handle: () => handle } } },
+  };
+
+  assert.equal(await host.resolveHostChatId(makeCtx()), 'stable-chat-fresh-ctx');
+  // 宿主 getContext() 每次回新物件；自取 ctx 的渲染路径（技能名、时钟）必须仍命中稳定 id
+  assert.equal(host.getHostChatId(makeCtx()), 'stable-chat-fresh-ctx');
+});
+
 test('Luker uses its chat sidecar without persisting chatStates globally', async () => {
   resetGlobals();
   let saved = null;
@@ -98,6 +112,96 @@ test('Luker uses its chat sidecar without persisting chatStates globally', async
   state.saveSettings(ctx);
   await new Promise((resolve) => setTimeout(resolve, 350));
   assert.equal(saved?.chatState?.characters?.Alice?.initialized, true);
+});
+
+test('Luker 2.7 envelopes: ok state hydrates, ok:false read stays unconfirmed, ok:false write rejects', async () => {
+  resetGlobals();
+  let read = { ok: true, state: { version: 1, chatState: { characters: { Alice: { initialized: true } }, snapshots: [] } } };
+  let write = { ok: true, state: {}, updated: true };
+  const ctx = {
+    chatId: 'luker-envelope',
+    extensionSettings: {},
+    saveSettingsDebounced() {},
+    async getChatState() { return read; },
+    async updateChatState(namespace, updater) { await updater({}); return write; },
+  };
+  globalThis.Luker = { getContext: () => ctx };
+  const settings = state.getSettings(ctx);
+  assert.equal(await state.hydrateChatStateFromHost(ctx, settings), true);
+  assert.equal(state.getChatState(ctx, settings).characters.Alice.initialized, true);
+  write = { ok: false, reason: 'conflict', hint: 'retry later' };
+  await assert.rejects(state.saveSettingsNow(ctx), /conflict/);
+
+  resetGlobals();
+  read = { ok: false, state: null, reason: 'transport_error' };
+  const other = { ...ctx, chatId: 'luker-envelope-failed' };
+  globalThis.Luker = { getContext: () => other };
+  const otherSettings = state.getSettings(other);
+  assert.equal(await state.hydrateChatStateFromHost(other, otherSettings), false);
+  assert.equal(host.isHostChatStateConfirmed(other), false);
+  resetGlobals();
+});
+
+test('a forked chat inherits a matching snapshot, but the placeholder key during a card switch does not', () => {
+  resetGlobals();
+  const chat = [{ name: 'A', is_user: false, mes: '开场' }, { name: 'U', is_user: true, mes: '你好' }];
+  const extensionSettings = {};
+  const source = { chatId: 'origin', characterId: 3, chat, extensionSettings, saveSettingsDebounced() {} };
+  globalThis.SillyTavern = { getContext: () => source };
+  const settings = state.getSettings(source);
+  const origin = state.getChatState(source, settings);
+  origin.characters.甲 = state.createDefaultFemaleState('甲');
+  state.recordChatStateSnapshot(source, origin, { reason: 'seed' });
+
+  const switching = { characterId: 3, chat, extensionSettings, saveSettingsDebounced() {} };
+  assert.equal(host.isPlaceholderHostChatId(switching), true);
+  assert.equal(Object.keys(state.getChatState(switching, settings).characters).length, 0, '临时键不复制分支资料');
+  assert.equal('3:solo' in settings.chatStates, false, '临时键的空状态不写进设定');
+
+  const fork = { chatId: 'fork', characterId: 3, chat, extensionSettings, saveSettingsDebounced() {} };
+  assert.equal(host.isPlaceholderHostChatId(fork), false);
+  assert.ok(state.getChatState(fork, settings).characters.甲, '真正的分支聊天照常继承');
+  resetGlobals();
+});
+
+test('TauriTavern without an open chat: a throwing chat handle does not break saving settings', async () => {
+  resetGlobals();
+  globalThis.__TAURITAVERN__ = { ready: Promise.resolve(), api: { chat: { current: { handle() { throw new Error('Failed to resolve active character id'); } } } } };
+  const ctx = { extensionSettings: {}, saveSettingsDebounced() {} };
+  globalThis.SillyTavern = { getContext: () => ctx };
+  const settings = state.getSettings(ctx);
+  state.getChatState(ctx, settings);
+  assert.doesNotThrow(() => state.saveSettings(ctx));
+  await assert.doesNotReject(state.saveSettingsNow(ctx));
+  resetGlobals();
+});
+
+test('a confirmed-empty chat gets no blank sidecar; real data and its later clearing are still written', async () => {
+  for (const kind of ['luker', 'tauritavern']) {
+    resetGlobals();
+    const writes = [];
+    const ctx = { chatId: `empty-${kind}`, extensionSettings: {}, saveSettingsDebounced() {} };
+    if (kind === 'luker') {
+      Object.assign(ctx, { async getChatState() { return { ok: true, state: null }; }, async updateChatState(ns, updater) { writes.push(await updater({})); return { ok: true }; } });
+      globalThis.Luker = { getContext: () => ctx };
+    } else {
+      const store = { async hasKey() { return false; }, async getJson() { return null; }, async setJson({ value }) { writes.push(value); } };
+      globalThis.__TAURITAVERN__ = { ready: Promise.resolve(), api: { chat: { current: { handle: () => ({ stableId: async () => `empty-${kind}`, store }), windowInfo: async () => ({ totalCount: 0 }) } } } };
+      globalThis.SillyTavern = { getContext: () => ctx };
+    }
+    const settings = state.getSettings(ctx);
+    await state.hydrateChatStateFromHost(ctx, settings);
+    assert.equal(host.isHostChatStateConfirmed(ctx), true, kind);
+    await state.saveSettingsNow(ctx);
+    assert.equal(writes.length, 0, `${kind}: blank state for a chat without a sidecar`);
+    state.getChatState(ctx, settings).characters.甲 = { initialized: true };
+    await state.saveSettingsNow(ctx);
+    assert.equal(writes.length, 1, `${kind}: real data is written`);
+    delete state.getChatState(ctx, settings).characters.甲;
+    await state.saveSettingsNow(ctx);
+    assert.equal(writes.length, 2, `${kind}: clearing written data still reaches the sidecar`);
+  }
+  resetGlobals();
 });
 
 test('character additional worldbooks come from charLore for the current character only', async () => {
@@ -185,6 +289,9 @@ test('TauriTavern chat state load caches Not-found results and dedupes concurren
 
   await host.resolveHostChatId(ctx);
   host.scheduleHostChatStateSave(ctx, { characters: {}, snapshots: [] });
+  await new Promise((resolve) => setTimeout(resolve, 350));
+  assert.equal(saved, null, 'a blank state is not written for a chat known to have no sidecar');
+  host.scheduleHostChatStateSave(ctx, { characters: { 甲: { initialized: true } }, snapshots: [] });
   await new Promise((resolve) => setTimeout(resolve, 350));
   assert.equal(saved?.version, 1);
   await host.loadHostChatState(ctx);
@@ -297,7 +404,7 @@ test('failed automatic request is blocked only for the same last message', () =>
   };
   globalThis.SillyTavern = { getContext: () => ctx };
   const chatState = state.createEmptyChatState();
-  chatState.lastFailedSignature = state.buildSignature(ctx, ctx.chat.length);
+  chatState.lastFailedChatSignature = state.buildSignature(ctx, ctx.chat.length);
   assert.equal(isFailedAutoRetryBlocked(ctx, chatState), true);
   ctx.chat.push({ is_user: false, name: 'Alice', mes: 'new reply' });
   assert.equal(isFailedAutoRetryBlocked(ctx, chatState), false);
@@ -318,20 +425,39 @@ test('tracker token budget defaults to 4096 and is clamped', () => {
   assert.equal(settings.trackerTokenBudget, 4096);
   settings.trackerTokenBudget = 999999;
   assert.equal(state.getSettings(ctx).trackerTokenBudget, 100000);
-  assert.equal(settings.requireFullDescriptionUpdates, false);
   assert.equal(settings.lukerMultiAgentManualOnly, true);
 });
 
-test('full description update mode adds the strict tracker instruction', () => {
-  const prompt = buildTrackerSystemPrompt('', null, { require_full_description_updates: true });
-  assert.equal(prompt.includes('[descriptions 完整更新模式：强制提示约束]'), true);
-  assert.equal(prompt.includes('所有既有子字段'), true);
+test('description updates send only changed or flagged fields; stale fields are named per present character', () => {
+  const prompt = buildTrackerSystemPrompt('', null, {});
+  assert.equal(prompt.includes('[descriptions 更新规则]'), true);
+  assert.equal(prompt.includes('只传本轮受剧情'), true);
+  assert.equal(prompt.includes('所有既有子字段'), false);
+  assert.equal(prompt.includes('[descriptions 待确认]'), false);
+  const flagged = buildTrackerSystemPrompt('', null, { existing_state: {
+    Alice: { name: 'Alice', profile: { staleDescriptionFields: { normalDescription: ['腹部', '症状'] } } },
+    Bea: { name: 'Bea', offscreen: true, profile: { staleDescriptionFields: { normalDescription: ['状态'] } } },
+  } });
+  assert.match(flagged, /\[descriptions 待确认\][\s\S]*- Alice normalDescription：腹部、症状/);
+  assert.equal(flagged.includes('Bea normalDescription'), false);
 });
 
-test('wardrobe preparation treats upper and lower garments as one main outfit', () => {
-  const prompt = buildWardrobePrepSystemPrompt({}, { wardrobePrepMainCount: 3, wardrobePrepAccessoryCount: 2 });
-  assert.equal(prompt.includes('完整套装，不是单件'), true);
-  assert.equal(prompt.includes('把上衣与下着合并为同一个 main'), true);
+test('the retired full description switch is dropped on load', () => {
+  resetGlobals();
+  const ctx = { chatId: 'x', characterId: 1, extensionSettings: { bs_biotracker: { requireFullDescriptionUpdates: true, chatStates: {} } }, saveSettingsDebounced() {} };
+  globalThis.SillyTavern = { getContext: () => ctx };
+  const settings = state.getSettings(ctx);
+  assert.equal('requireFullDescriptionUpdates' in settings, false);
+});
+
+test('wardrobe supplement stays small and uses semantic clothing fields', () => {
+  const prompt = buildWardrobePrepSystemPrompt({}, {});
+  assert.equal(prompt.includes('一般补充 2-4 项'), true);
+  assert.equal(prompt.includes('只有用户要求整理、汰换、丢掉不合身衣物时才输出 remove'), true);
+  assert.equal(prompt.includes('不得丢掉 payload.existing_outfit 正在穿的衣物'), true);
+  assert.equal(prompt.includes('fitProfile'), true);
+  assert.equal(prompt.includes('不改变当前穿着'), true);
+  assert.equal(prompt.includes('不要输出数值四维'), true);
 });
 
 test('psychology tool is hidden until a character has breeding stage profiles', () => {
@@ -356,13 +482,13 @@ test('tracker prompt omits psychology guidance when no breeding inference exists
   assert.equal(prompt.includes('bsUpdatePsychology'), false);
 });
 
-test('wardrobe and psychology tools reject targets without their opt-in state', () => {
+test('wardrobe is automatic while psychology still requires inferred stage profiles', () => {
   const chatState = state.createEmptyChatState();
   chatState.characters.Alice = state.createDefaultFemaleState('Alice');
   assert.equal(applyToolCall(chatState, {
     name: 'bsAddWardrobeItem',
-    arguments: { female: 'Alice', item: { id: 1, name: '外套', note: '黑色外套', slot: 'main', masking: 1, support: 0, capacity: 1, convenience: 1 } },
-  }).applied, false);
+    arguments: { female: 'Alice', item: { id: 1, name: '外套', note: '黑色外套', slot: 'accessory', category: 'outerwear', effects: ['masking_up'] } },
+  }).applied, true);
   assert.equal(applyToolCall(chatState, {
     name: 'bsUpdatePsychology',
     arguments: { female: 'Alice', options: { mens: { mastery: 1 } } },
@@ -375,10 +501,10 @@ test('the first description update can initialize a blank registered field', () 
   chatState.characters.Alice.initialized = true;
   const result = applyToolCall(chatState, {
     name: 'bsSetDescription',
-    arguments: { female: 'Alice', options: { pregnantDescription: '胎况|已着床，等待后续观察;;' } },
+    arguments: { female: 'Alice', options: { pregnantDescription: { 胎况: '已着床，等待后续观察' } } },
   });
   assert.equal(result.applied, true);
-  assert.equal(chatState.characters.Alice.profile.descriptions.pregnantDescription, '胎况|已着床，等待后续观察;;');
+  assert.deepEqual(chatState.characters.Alice.profile.descriptions.pregnantDescription, [{ name: '胎况', value: '已着床，等待后续观察', updatedAt: 0 }]);
 });
 
 test('breeding inference accepts psychology-wrapped stage profiles', () => {
@@ -487,12 +613,17 @@ test('registry skill prompt reuses catalog and atomically creates described miss
 });
 
 test('dedicated registry skill prompt requires catalog reuse and described new definitions', () => {
-  const prompt = buildRegistrySkillSystemPrompt({ skillPrompt: '她擅长剑术。' });
+  const prompt = buildRegistrySkillSystemPrompt({
+    skillPrompt: '她擅长剑术。',
+    skillBaselinePrompt: '只建立正格冒险技能，不使用调教技能。',
+  });
   assert.match(prompt, /payload\.skill_catalog/);
   assert.match(prompt, /不得用近义词建立重复技能/);
   assert.match(prompt, /每个新定义必须同时提供 name 与明确说明技能范围的 description/);
   assert.match(prompt, /initialSkills/);
   assert.match(prompt, /initialTalents/);
+  assert.match(prompt, /严格遵守 payload\.skill_baseline_prompt/);
+  assert.match(prompt, /即使图鉴已有被基准排除的技能/);
 });
 
 test('skill ids are never reused and snapshots restore catalog plus allocator', () => {
@@ -506,15 +637,18 @@ test('skill ids are never reused and snapshots restore catalog plus allocator', 
   applyToolCall(chatState, { name: 'bsRegisterSkillDefinition', arguments: { name: '枪术', description: '长枪的运用。' } });
   assert.deepEqual(chatState.skillCatalog.map((item) => item.id), [1, 3]);
   assert.equal(chatState.nextSkillId, 4);
+  chatState.skillBaselinePrompt = '只追踪冒险技能。';
 
   const ctx = { chatId: 'snapshot-skill-test', chat: [] };
   state.recordChatStateSnapshot(ctx, chatState, { reason: 'skill_snapshot' });
   const snapshot = chatState.snapshots.at(-1);
   chatState.skillCatalog = [{ id: 99, name: '错误定义', description: '不应保留。' }];
   chatState.nextSkillId = 100;
+  chatState.skillBaselinePrompt = '错误基准';
   state.restoreChatStateFromSnapshot(chatState, snapshot);
   assert.deepEqual(chatState.skillCatalog.map((item) => item.id), [1, 3]);
   assert.equal(chatState.nextSkillId, 4);
+  assert.equal(chatState.skillBaselinePrompt, '只追踪冒险技能。');
 });
 
 test('middle-pregnancy training passes talent to one randomly selected fetus through childbirth', () => {
@@ -561,7 +695,7 @@ test('middle-pregnancy training passes talent to one randomly selected fetus thr
   assert.equal(chatState.characters.Alice.profile.children[0].birthWeightRatio, 1.25);
   assert.equal(chatState.characters.Alice.profile.children[0].birthAffinity, 50);
   assert.equal(applyToolCall(chatState, {
-    name: 'bsNameChild', arguments: { female: 'Alice', childIndex: 0, name: '莉亚' },
+    name: 'bsRecordExperience', arguments: { female: 'Alice', action: 'child', time: '今日', childIndex: 0, name: '莉亚' },
   }).applied, true);
   chatState.characters['莉亚'] = state.createDefaultFemaleState('莉亚');
   const registered = applyInitialSkillTalentConfig(chatState, '莉亚', {
@@ -695,6 +829,11 @@ test('skill tool and inheritance guidance are always available to tracker', () =
   const prompt = buildTrackerSystemPrompt('', null, {});
   assert.equal(prompt.includes('[skills / talents]'), true);
   assert.equal(prompt.includes('第二与第三产程禁止传递'), true);
+  const boundedPrompt = buildTrackerSystemPrompt('', null, {
+    skill_baseline_prompt: '只追踪战斗、生存、探索与交涉；排除调教技能。',
+  });
+  assert.match(boundedPrompt, /\[本聊天技能基准：高优先级\]/);
+  assert.match(boundedPrompt, /不得为基准排除的类别调用 bsRegisterSkillDefinition 或 bsTrainSkill/);
 });
 
 test('derived type overrides affect base types and custom subtypes', () => {
@@ -710,7 +849,7 @@ test('derived type overrides affect base types and custom subtypes', () => {
   assert.equal(raceConfig.getDerivedTypeIntroductionLine('不死-僵尸'), '亡者衍生类型的简短说明。');
   assert.equal(raceConfig.getDerivedTypeFluxProfile('不死').fluxDefinition, '自定义描述');
   assert.equal(raceConfig.getDerivedTypeInheritanceProfile('不死-僵尸').inheritanceSpeed, 3.5);
-  assert.deepEqual(raceConfig.getDerivedTypeMetabolismExemptions('不死'), ['odor', 'sleep', 'milk']);
+  assert.deepEqual(raceConfig.getDerivedTypeMetabolismExemptions('不死'), ['sleep', 'milk']);
   assert.equal(raceConfig.getDerivedTypeOverride('不死-僵尸').metabolismExemptions, undefined);
   raceConfig.setDerivedTypeOverrides({});
   assert.equal(raceConfig.getDerivedTypeFluxProfile('不死').fluxName, '死气');
@@ -744,7 +883,7 @@ test('an unhydrated blank state never overwrites an existing TauriTavern sidecar
   assert.deepEqual(writes, [], '未确认存档内容前不得写入空状态');
 });
 
-test('a blank state may be persisted once the sidecar content is confirmed', async () => {
+test('a confirmed-missing sidecar is not created just to hold a blank state', async () => {
   resetGlobals();
   const writes = [];
   const handle = {
@@ -765,9 +904,8 @@ test('a blank state may be persisted once the sidecar content is confirmed', asy
   state.saveSettings(ctx);
   await new Promise((resolve) => setTimeout(resolve, 350));
 
-  // 已确认没有存档 → 写空无害，使用者主动「清除」也才能落盘
-  assert.equal(writes.length, 1);
-  assert.deepEqual(writes[0].chatState.characters, {});
+  // 已确认没有存档 → 没有东西要清，不为空状态建档；写过真资料后的清除见下一则测试
+  assert.equal(writes.length, 0);
 });
 
 test('real registration data still saves normally while unhydrated', async () => {
@@ -853,6 +991,51 @@ test('native SillyTavern is always confirmed and never waits on a sidecar', asyn
   assert.equal(await host.loadHostChatState(ctx), null);
 });
 
+test('destructive native SillyTavern save schedules a trailing write and awaits the immediate write', async () => {
+  resetGlobals();
+  let debouncedCalls = 0;
+  let immediateCalls = 0;
+  let releaseImmediate;
+  const immediateBlocked = new Promise((resolve) => { releaseImmediate = resolve; });
+  const ctx = {
+    chatId: 'native-immediate-save',
+    extensionSettings: {},
+    saveSettingsDebounced() { debouncedCalls += 1; },
+    async saveSettings() {
+      immediateCalls += 1;
+      await immediateBlocked;
+    },
+  };
+  globalThis.SillyTavern = { getContext: () => ctx };
+  const settings = state.getSettings(ctx);
+  state.getChatState(ctx, settings);
+
+  let settled = false;
+  const saving = state.saveSettingsNow(ctx).then(() => { settled = true; });
+  await Promise.resolve();
+  assert.equal(debouncedCalls, 1);
+  assert.equal(immediateCalls, 1);
+  assert.equal(settled, false, '成功提示前必须等原生 ST 写入结束');
+
+  releaseImmediate();
+  await saving;
+  assert.equal(settled, true);
+});
+
+test('native SillyTavern immediate save failure is reported to the destructive-operation rollback', async () => {
+  resetGlobals();
+  const ctx = {
+    chatId: 'native-immediate-failure',
+    extensionSettings: {},
+    saveSettingsDebounced() {},
+    async saveSettings() { throw new Error('settings write failed'); },
+  };
+  globalThis.SillyTavern = { getContext: () => ctx };
+  const settings = state.getSettings(ctx);
+  state.getChatState(ctx, settings);
+  await assert.rejects(state.saveSettingsNow(ctx), /settings write failed/);
+});
+
 function installTauriHostWithStore(store, stableId) {
   const handle = { stableId: async () => stableId, store };
   const ctx = { chatId: `${stableId}-fallback`, extensionSettings: {}, saveSettingsDebounced() {} };
@@ -930,4 +1113,98 @@ test('a failing list method degrades to the original read path', async () => {
   const settings = state.getSettings(ctx);
   assert.equal(await state.hydrateChatStateFromHost(ctx, settings), true);
   assert.equal(getJsonCalls, 1, '列举失败不得让载入跟着失败');
+});
+
+test('immediate sidecar save cancels a pending debounce and persists the newest state', async () => {
+  resetGlobals();
+  const writes = [];
+  const ctx = installTauriHostWithStore({
+    setJson: async ({ value }) => { writes.push(value); },
+  }, 'stable-immediate-save');
+  await host.resolveHostChatId(ctx);
+
+  host.scheduleHostChatStateSave(ctx, {
+    characters: { Alice: { initialized: true } },
+    snapshots: [],
+  });
+  await host.flushHostChatStateSave(ctx, {
+    characters: {},
+    snapshots: [{ reason: 'unregister' }],
+  });
+
+  assert.equal(writes.length, 1, '尚未开始的旧防抖写入应被取消');
+  assert.deepEqual(writes[0].chatState.characters, {});
+});
+
+test('immediate sidecar save waits behind an older in-flight write', async () => {
+  resetGlobals();
+  const writes = [];
+  let releaseFirstWrite;
+  const firstWriteBlocked = new Promise((resolve) => { releaseFirstWrite = resolve; });
+  const ctx = installTauriHostWithStore({
+    setJson: async ({ value }) => {
+      writes.push(value);
+      if (writes.length === 1) await firstWriteBlocked;
+    },
+  }, 'stable-serialized-save');
+  await host.resolveHostChatId(ctx);
+
+  host.scheduleHostChatStateSave(ctx, {
+    characters: { Alice: { initialized: true } },
+    snapshots: [],
+  });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(writes.length, 1, '旧写入应已开始');
+
+  const deletionSave = host.flushHostChatStateSave(ctx, {
+    characters: {},
+    snapshots: [{ reason: 'unregister' }],
+  });
+  await Promise.resolve();
+  assert.equal(writes.length, 1, '删除写入必须等待旧写入结束');
+  releaseFirstWrite();
+  await deletionSave;
+
+  assert.equal(writes.length, 2);
+  assert.ok(writes[0].chatState.characters.Alice);
+  assert.deepEqual(writes[1].chatState.characters, {}, '最后落盘的必须是删除后的状态');
+});
+
+test('loading settings drops empty placeholder-key shells left by older versions, but keeps any with data', () => {
+  resetGlobals();
+  const filled = state.createEmptyChatState();
+  filled.characters.乙 = state.createDefaultFemaleState('乙');
+  const extensionSettings = { bs_biotracker: { chatStates: {
+    'char:solo': state.createEmptyChatState(),
+    '80:solo': state.createEmptyChatState(),
+    '5:1700000000000': state.createEmptyChatState(),
+    '12:solo': filled,
+    '角色 - 2026-10-08@15h54m10s329ms': state.createEmptyChatState(),
+  } } };
+  const ctx = { chatId: 'x', characterId: 1, extensionSettings, saveSettingsDebounced() {} };
+  globalThis.SillyTavern = { getContext: () => ctx };
+  const keys = Object.keys(state.getSettings(ctx).chatStates);
+  assert.deepEqual(keys.sort(), ['12:solo', '角色 - 2026-10-08@15h54m10s329ms'].sort());
+  resetGlobals();
+});
+
+test('a chat-deleted event only clears the chat it names, never the one that is open', () => {
+  assert.equal(host.extractDeletedChatKey('角色 - 2026-10-08@18h04m41s444ms'), '角色 - 2026-10-08@18h04m41s444ms', 'SillyTavern passes the chat file name');
+  assert.equal(host.extractDeletedChatKey('角色 - 2026-10-08@18h04m41s444ms.jsonl'), '角色 - 2026-10-08@18h04m41s444ms');
+  assert.equal(host.extractDeletedChatKey({ chatId: 'abc' }), 'abc');
+  assert.equal(host.extractDeletedChatKey({ data: { chat_id: 'def' } }), 'def');
+  assert.equal(host.extractDeletedChatKey(undefined), '', 'an unrecognised event must not fall back to the open chat');
+  assert.equal(host.extractDeletedChatKey({}), '');
+});
+
+test('the retired after_user trigger setting is dropped on load; tracking only follows AI replies', () => {
+  resetGlobals();
+  const ctx = { chatId: 'x', characterId: 1, extensionSettings: { bs_biotracker: { triggerTiming: 'after_user', chatStates: {} } }, saveSettingsDebounced() {} };
+  globalThis.SillyTavern = { getContext: () => ctx };
+  const settings = state.getSettings(ctx);
+  assert.equal('triggerTiming' in settings, false);
+  assert.equal(state.shouldTriggerForMessage({ is_user: false, mes: '回复' }), true);
+  assert.equal(state.shouldTriggerForMessage({ is_user: true, mes: '送出' }), false);
+  assert.equal(state.shouldTriggerForMessage(undefined), false);
+  resetGlobals();
 });

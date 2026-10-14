@@ -1,7 +1,14 @@
-import { callOpenAICompatible, resolveOverallDeadlineMs } from './api.js';
+import { inferPendingPsychology } from './registry.js';
+import { findWorldInfoMissingFromSnapshot, resolveHostWorldInfo, stripExcludedFromSnapshot } from './worldinfo_resolve.js';
+import { isOwnRequest } from './own_requests.js';
+import { getWorldbookEntryActivationMode, worldbookEntryKeywordsMatch } from './worldbook_match.js';
+import { getDisabledSpecialToolNames, isRealisticWorld } from './world_mode.js';
+import { syncCardSettings } from './card_settings.js';
+import { naturalNoticeDays, psychologySide } from './reproductive.js';
+import { abortActiveApiRequests, callOpenAICompatible, isApiUserAbortError, resolveOverallDeadlineMs } from './api.js';
 import { buildMainFlowStatePrompt, buildTrackerSystemPrompt } from './tracker_prompt_context.js';
 import { DEFAULT_WEAR_STATE, sanitizeWearState } from './wardrobe_config.js';
-import { applyToolCallsResult, isFetusKnownToCharacter, TOOL_DEFINITIONS } from './tools.js';
+import { applyToolCallsResult, describeBackSide, describeFetalPosition, getFetusAmnionDurability, getPregnancyNutritionTotal, isFetusKnownToCharacter, TOOL_DEFINITIONS } from './tools.js';
 import {
   buildRecentMessages,
   buildSignature,
@@ -10,6 +17,9 @@ import {
   DEFAULT_SYSTEM_PROMPT,
   getCharacterCard,
   getCharacterWorldBookName,
+  isSkillSystemEnabled,
+  isWardrobeSystemEnabled,
+  projectWorldbook,
   getCharacterWorldBookNameViaSTscript,
   getActiveGlobalWorldBookNames,
   getCharacterAdditionalWorldBookNames,
@@ -31,10 +41,12 @@ import {
   saveSettings,
   shouldTriggerForMessage,
   worldbookSelectionMatches,
+  normalizeWorldbookMode,
 } from './state.js';
 import { getDerivedTypeMetabolismExemptions } from './race_config.js';
 import { LABOR_STAGES, PREGNANCY_STAGES } from './stage_config.js';
 import { readMemorySource } from './memory_sources.js';
+import { DESCRIPTION_FIELDS, descriptionListToObject, getStaleDescriptionFields } from './descriptions.js';
 import { canLoadHostWorldInfo, getHostAgentRunBarrier, getHostChat, getHostExtensionSettings, getHostKind, loadHostWorldInfo, refreshHostChatView } from './host.js';
 
 export const POLL_RUNTIME_KEY = '__bs_biotracker_poll__';
@@ -75,8 +87,6 @@ const mvuGateState = {
   pendingKey: '',
   pendingContentKey: '',
   pendingSince: 0,
-  // 提示只在每个聊天第一次真正等待时弹一次：逐轮提示在长对话里等同于噪音
-  announcedChatKey: '',
   // fetch 钩子观测：正文之后出现的额外生成请求（MVU 额外模型解析的硬信号）
   fetchHooked: false,
   generateInFlight: 0,
@@ -131,11 +141,7 @@ export function isFailedAutoRetryBlocked(ctx, chatState) {
   if (chat.length === 0) return false;
   const currentChatSignature = buildSignature(ctx, chat.length);
   const failedChatSignature = String(chatState?.lastFailedChatSignature || '');
-  if (failedChatSignature) return failedChatSignature === currentChatSignature;
-  // 旧存档没有这个栏位时，沿用原本的尾楼比对
-  const failedSignature = String(chatState?.lastFailedSignature || '');
-  if (!failedSignature) return false;
-  return failedSignature === currentChatSignature;
+  return Boolean(failedChatSignature) && failedChatSignature === currentChatSignature;
 }
 
 function getMvuApi() {
@@ -158,8 +164,7 @@ export function getMvuSettings(ctx) {
   return null;
 }
 
-export function isMvuExtraAnalysisEnabled(ctx, settings) {
-  if (settings.mvuExtraAnalysisCompat === false) return false;
+export function isMvuExtraAnalysisEnabled(ctx, _settings) {
   const mvuSettings = getMvuSettings(ctx);
   if (!mvuSettings) return false;
   if (mvuSettings.更新方式 !== '额外模型解析') return false;
@@ -182,7 +187,7 @@ function getMvuContentKey(ctx) {
   return buildSignature(ctx, getHostChat(ctx).length);
 }
 
-function installMvuGateListener(ctx) {
+export function installMvuGateListener(ctx) {
   if (mvuGateState.eventInstalled) return;
   const handler = () => {
     const key = getMvuRoundKey(ctx);
@@ -206,17 +211,6 @@ function installMvuGateListener(ctx) {
     console.warn('[BS BioTracker] 无法订阅 MVU 变量更新事件', error);
   }
   mvuGateState.eventInstalled = installed;
-}
-
-function notifyMvuGateWaiting(ctx) {
-  const chatKey = getChatKey(ctx);
-  if (!chatKey || mvuGateState.announcedChatKey === chatKey) return;
-  mvuGateState.announcedChatKey = chatKey;
-  try {
-    globalThis.toastr?.info?.('检测到 MVU 额外模型解析请求，等待变量更新完成后再追踪', '[BS BioTracker] MVU 兼容');
-  } catch {
-    // 无 toastr 的环境静默即可
-  }
 }
 
 function isGenerateFetchRequest(input) {
@@ -273,7 +267,7 @@ export function isMvuExtraAnalysisRequest(input, init) {
  * 观测非本插件发出的生成请求（MVU 额外模型解析/其他扩展的二次调用）。
  * 不依赖 MVU 的设置或全局对象——TT 下这些常常读不到，
  * 但 MVU 的请求必然走页面里的 fetch，这是最可靠的运行时信号。
- * 本插件自己的请求带 __bs_biotracker_async_request__ 标记，不计数。
+ * 本插件自己的请求由 own_requests.js 记下，不计数。
  */
 export function installMvuFetchHook() {
   if (mvuGateState.fetchHooked || typeof globalThis.fetch !== 'function') return;
@@ -281,7 +275,7 @@ export function installMvuFetchHook() {
   globalThis.fetch = async (...args) => {
     // 只观测「确实带 MVU 特征」的额外解析请求——普通 ST 主线生成请求
     // 也走同一 generate 端点，若不加特征过滤会把无 MVU 卡误判为 MVU 环境
-    if (!globalThis.__bs_biotracker_async_request__ && isMvuExtraAnalysisRequest(args[0], args[1])) {
+    if (!isOwnRequest(args[1]) && isMvuExtraAnalysisRequest(args[0], args[1])) {
       mvuGateState.generateInFlight += 1;
       mvuGateState.lastGenerateStartedAt = Date.now();
       mvuGateState.sawGenerateThisRound = true;
@@ -297,15 +291,22 @@ export function installMvuFetchHook() {
   mvuGateState.fetchHooked = true;
 }
 
-export function shouldWaitForMvuExtraAnalysis(ctx, settings) {
-  if (settings.mvuExtraAnalysisCompat === false) return false;
+export function shouldWaitForMvuExtraAnalysis(ctx, _settings) {
   const chat = getHostChat(ctx);
   const last = chat[chat.length - 1];
-  // after_user 等时机下 MVU 的解析早已完成，无需等待
+  // 尾楼是使用者消息（例如手动分析）时没有 MVU 解析要等
   if (!last || last.is_user) return false;
 
   // fetch 钩子必须在首次评估前就装好：否则正文后第一时间启动的 MVU 请求会被漏观测
   installMvuFetchHook();
+
+  // MVU 只在「优先实例」上把 Mvu 挂到 window.parent（见其 store 的 should_enable），
+  // 所以全局不在场＝本轮没有激活的 MVU 实例＝不会有人做额外模型解析。
+  const mvu = getMvuApi();
+  const mvuPresent = mvu !== null;
+  // 不在场就抹掉「见过 MVU 信号」的记忆：该标记是页面级粘性、生产路径上无人清除，
+  // 停用 MVU 或换到没有 MVU 的卡之后它仍为真，会让每一轮都白等一次宽限期。
+  if (!mvuPresent) mvuGateState.everSawMvuSignal = false;
 
   const mvuSettings = getMvuSettings(ctx);
   const method = mvuSettings?.更新方式;
@@ -316,12 +317,16 @@ export function shouldWaitForMvuExtraAnalysis(ctx, settings) {
     const autoRequest = mvuSettings?.额外模型解析配置?.启用自动请求 ?? mvuSettings?.自动触发额外模型解析;
     if (autoRequest === false) return false;
   }
-  const mvu = getMvuApi();
-  const mvuCapable = mvu && typeof mvu.isDuringExtraAnalysis === 'function';
+  // 设置是会话无关的持久态，会残留：mvu_settings 存在 SillyTavern.extensionSettings
+  // （全局、跨卡跨聊天共享、MVU 落盘后无人清理），停用 MVU 或换到没有 MVU 的卡之后
+  // 它依然在。只凭设置就认定「本环境有 MVU」，会把这类用户当成 MVU 用户——每轮白等
+  // 宽限期，并让下面的 fetch 兜底信号生效（最长 120 秒）。故设置须与「全局在场」同时
+  // 成立才算证据。
+  const mvuCapable = Boolean(mvu && typeof mvu.isDuringExtraAnalysis === 'function');
   // 三种信号源全部不可用（fetch 被禁用、无 Mvu、设置读不到）→ 无从判断
   if (!mvuGateState.fetchHooked && !mvuCapable && method !== '额外模型解析') return false;
   if (mvuCapable) mvuGateState.everSawMvuSignal = true;
-  if (method === '额外模型解析') mvuGateState.everSawMvuSignal = true;
+  if (mvuPresent && method === '额外模型解析') mvuGateState.everSawMvuSignal = true;
 
   installMvuGateListener(ctx);
   const roundKey = getMvuRoundKey(ctx);
@@ -335,42 +340,312 @@ export function shouldWaitForMvuExtraAnalysis(ctx, settings) {
     mvuGateState.sawGenerateThisRound = false;
   } else if (mvuGateState.pendingContentKey !== contentKey) {
     // 同 id 消息被重掷/编辑：内容已变，视为新轮次，重新开启等待窗口，
-    // 避免旧 pendingSince 过期导致宽限路径立即放行
+    // 避免旧 pendingSince 过期导致宽限路径立即放行。
+    // 但正文替换的落库同样会改变内容指纹：它的戳记晚于等待起点时只更新指纹、
+    // 不重排等待起点，否则每次替换都会把宽限续满，MVU 结束后的追踪被越推越晚。
     mvuGateState.pendingContentKey = contentKey;
-    mvuGateState.pendingSince = now;
-    mvuGateState.sawGenerateThisRound = false;
+    if (!isReplacementAfter({ stampedAt: mvuGateState.pendingSince }, last)) {
+      mvuGateState.pendingSince = now;
+      mvuGateState.sawGenerateThisRound = false;
+    }
   }
 
   // 信号 1：MVU 全局 API 报告正在解析
   const during = mvuCapable && mvu.isDuringExtraAnalysis() === true;
-  // 信号 2：正文之后仍有非本插件的生成请求在飞行（MVU 额外解析/重试等）
-  const generateActive = mvuGateState.generateInFlight > 0;
+  // 信号 2：正文之后仍有非本插件的生成请求在飞行——仅作旧版 MVU（全局在场但它
+  // 没有 isDuringExtraAnalysis 方法）的兜底。请求特征会被误命中：数据库正文替换/
+  // 填表的请求体嵌着含 <UpdateVariable>、json_patch 字样的正文与提示词。
+  // 两个前提缺一不可：只有全局在场才说明真有 MVU 可能在做解析（否则没人会解析，
+  // 等下去纯属空转），且只有带不了权威标志的旧版才需要退而采信请求特征。
+  const generateActive = mvuPresent && !mvuCapable && mvuGateState.generateInFlight > 0;
   // 生成请求只作为本轮「在飞」等待信号，不参与 everSawMvuSignal——
   // 否则普通 ST 主流请求也会让设备被标记为「见过 MVU 信号」，导致每轮白等宽限
   if (during) mvuGateState.everSawMvuSignal = true;
 
-  const waiting = resolveMvuGateWaiting(roundKey, contentKey, now, during || generateActive);
-  // 提示只在真的推迟了追踪时才弹：先前无条件按「更新方式=额外模型解析」提示，
-  // 会在本轮解析早已结束、根本没等待的情况下也弹一次
-  if (waiting) notifyMvuGateWaiting(ctx);
+  // 结束事件与评估之间正文若被替换改写过（指纹对不上），只要替换戳晚于结束事件，
+  // 说明 MVU 的产物已落定、无需再等宽限——直接放行，在最终正文上只追一轮
+  const endedKeyMatch = mvuGateState.lastEndedKey === roundKey;
+  const replacementAfterEnd = endedKeyMatch
+    && isReplacementAfter({ stampedAt: mvuGateState.lastEndedAt }, last);
+  const waiting = resolveMvuGateWaiting(roundKey, contentKey, now, during || generateActive, replacementAfterEnd);
+  // 等待全程静默：MVU 解析结束紧接着就是追踪提示，中间再弹一条等待提示纯属噪音；
+  // 排查时看 console 即可
+  if (waiting) console.debug('[BS BioTracker] MVU 額外解析尚未結束，本輪追蹤推遲');
   return waiting;
 }
 
-function resolveMvuGateWaiting(roundKey, contentKey, now, signalActive) {
+function resolveMvuGateWaiting(roundKey, contentKey, now, signalActive, replacementAfterEnd) {
   if (signalActive) return now - mvuGateState.pendingSince < MVU_EXTRA_MAX_WAIT_MS;
   // 本轮变量更新已结束（事件新鲜且内容指纹一致）→ 放行
   if (mvuGateState.lastEndedKey === roundKey
-    && mvuGateState.lastEndedContentKey === contentKey
-    && now - mvuGateState.lastEndedAt < MVU_EXTRA_ENDED_STALE_MS) return false;
+    && now - mvuGateState.lastEndedAt < MVU_EXTRA_ENDED_STALE_MS
+    && (mvuGateState.lastEndedContentKey === contentKey || replacementAfterEnd)) return false;
   // 从没见过任何 MVU 信号（非 MVU 卡）→ 不等待；见过 → 宽限期内等信号出现
   if (!mvuGateState.everSawMvuSignal) return false;
   return now - mvuGateState.pendingSince < MVU_EXTRA_WAIT_GRACE_MS;
 }
 
-function normalizeWorldbookMode(value) {
-  const mode = String(value || 'exclude').trim();
-  if (mode === 'mainflow' || mode === 'allowlist_all' || mode === 'exclude') return mode;
-  return 'exclude';
+// ---- 主生成忙碌闸门 / 静默正文替换吸收 ----
+// 「异步追踪 + MVU 额外模型解析 + 数据库正文替换」同时开启时，一轮回复会被追三遍：
+// 主生成没完就对着残缺正文抢发一轮（宿主串流期间按 chunk 往 mes 写半成品，
+// chunk 间隙一超过 settle 稳定窗就被判成「说完了」）、正文替换用
+// setChatMessages 原地静默改写同楼层 mes 又不发任何宿主事件，快照的边界签名
+// 失配被当成新内容又追一轮。对应两条规则：
+// 1. 轮询在「宿主主生成在飞」时不发追踪。判据只用两个权威信号源的并集：
+//    停止按钮 DOM 旗标（document.body.dataset.generating，ST/TT 同源，重掷/
+//    续写/群成员/借道 Generate 的生成都会点亮）与未闭合的 generation_started
+//    事件（带超时自愈）。不使用 ctx.streamingProcessor：插件持有的是加载时的
+//    一次性 getContext() 快照，该字段指望不上。也不把「带 MVU 特征的 fetch 在
+//    飞」当忙碌信号：正文替换与填表请求的 body 本就会嵌进含 <UpdateVariable>
+//    的正文，被特征命中，TT 实测会把整条数据库后处理排进追踪前面、拖出约两
+//    分钟延迟。MVU 额外模型解析的等待仍由既有兼容门控负责（TT 走带停止按钮的
+//    Generate 管线，dataset 信号同样会覆盖它这一程）；兼容开关语义原样不变。
+// 2. 正文替换会把毫秒时间戳 `_acu_last_optimized_at` 写进该楼层的 extra——
+//    shujuku 与 shujuku-rebuild 皆然，只有正文替换写它、随消息持久化、跨页面
+//    重载有效。楼层已有追踪回执、且该时间戳晚于回执时，正文差异就是替换改写：
+//    就地重锚签名、不重发请求（恒开、无提示）。手动编辑、重掷、续写、换楼层都
+//    不会盖出这个时间戳，照常走追踪路径；若宿主事件计数之类的内存态一律不作为
+//    判据（重载即归零，会把编辑后的合法改动误判成「无痕」而吞掉）。将来若出现
+//    不打此标记的其他静默写回者，宁可多追一轮也不漏，方向安全。
+
+const HOST_BUSY_STALE_MS_KEY = '__bs_biotracker_host_busy_stale_ms__';
+/** 两个数据库正文替换落库时在楼层 extra 上盖的毫秒时间戳（唯一写者） */
+const CONTENT_REPLACEMENT_MARK_KEY = '_acu_last_optimized_at';
+
+const hostRunState = {
+  listenersInstalled: false,
+  generationDepth: 0,
+  generationBusySince: 0,
+  // 编辑/抽卡事件计数：吸收判定要求「回执之后没有编辑事件」。持久化到
+  // settings.hostMutSeqCounter 并在载入时回填，重载后继续单调递增——纯内存
+  // 计数重载归零会把「重载后的手动编辑」误判成无痕而吞掉追踪。
+  mutSeq: 0,
+  ctxRef: null,
+};
+export const __hostRunStateForTest = hostRunState;
+// 与 MVU 门控同法：挂到全局方便在真实宿主的 console 里排查触发问题
+globalThis.__bs_biotracker_debug_host_run__ = hostRunState;
+
+function resolveHostEventName(ctx, typeKey, fallback) {
+  const types = ctx?.eventTypes || ctx?.event_types;
+  const resolved = types?.[typeKey];
+  return typeof resolved === 'string' && resolved ? resolved : fallback;
+}
+
+function markHostGenerationStart(...args) {
+  // dry-run（token 计数拼 prompt）只发 STARTED 不发 ENDED：按钮从没显示过，
+  // 两家宿主 hideStopButton 的 NOOP 守卫都会吞掉 ENDED。计入深度等于把自动追踪
+  // 卡到 600 秒自愈。两家 STARTED 的最后一个事件参数都是 dryRun（ST/TT 一致），
+  // 只在这个确切形状下跳过，其它一律照计。
+  if (args.length > 0 && args[args.length - 1] === true) return;
+  hostRunState.generationDepth += 1;
+  if (hostRunState.generationDepth === 1) hostRunState.generationBusySince = Date.now();
+}
+
+function markHostGenerationEnd() {
+  // 宿主 GENERATION_ENDED 只在停止按钮真的从显示转隐藏时发、嵌套不去重：一轮群里
+  // 连续生成可能 STARTED 多次、ENDED 一次。把 ended/stopped 当作「宿主自认生成
+  // 已全部结束」的权威信号直接清空深度（dataset 旗标仍是独立信号，真在飞时
+  // 不会假清空），否则计数只增不减会把追踪卡死到看门狗上限。
+  hostRunState.generationDepth = 0;
+  hostRunState.generationBusySince = 0;
+}
+
+function bumpHostMutSeq() {
+  // 先回填再自增：重载后「首次轮询（hydrate）之前就来了编辑事件」时，
+  // 不回填会把持久化的大计数覆成小值，令锚点比对失效、编辑被吞
+  const ctx = hostRunState.ctxRef;
+  let settings = null;
+  try {
+    settings = ctx ? getSettings(ctx) : null;
+    if (settings) hydrateHostMutSeq(settings);
+  } catch {}
+  hostRunState.mutSeq += 1;
+  // 立即持久化：编辑事件是低频人工操作，直接存不心疼；不存的话「编辑后未及
+  // 保存就重载」会让下一会话的回填值偏小、编辑痕迹丢失
+  try {
+    if (settings && ctx) {
+      settings.hostMutSeqCounter = hostRunState.mutSeq;
+      saveSettings(ctx);
+    }
+  } catch {}
+}
+
+/** 从持久化存档回填编辑计数（重载后 max(内存, 存档) 起步，保持单调）。 */
+export function hydrateHostMutSeq(settings) {
+  const persisted = Number(settings?.hostMutSeqCounter);
+  if (Number.isFinite(persisted) && persisted > hostRunState.mutSeq) hostRunState.mutSeq = persisted;
+}
+
+export function installHostRunWatchers(ctx) {
+  if (hostRunState.listenersInstalled) return;
+  const source = ctx?.eventSource;
+  if (!source || typeof source.on !== 'function') return;
+  hostRunState.ctxRef = ctx;
+  // 安装即回填持久计数：首个编辑事件即使在任何轮询评估之前到达，
+  // 也在正确的基准上自增，不会把存档里的大计数覆成小值
+  try {
+    hydrateHostMutSeq(getSettings(ctx));
+  } catch {}
+  // 无论订到第几个都标记为已安装、不再重试：宿主 eventSource.on 实际不会抛，
+  // 万一抛了也只可能缺一腿，重复叠加监听反而会把深度计数订乱
+  hostRunState.listenersInstalled = true;
+  try {
+    source.on(resolveHostEventName(ctx, 'GENERATION_STARTED', 'generation_started'), markHostGenerationStart);
+    source.on(resolveHostEventName(ctx, 'GENERATION_STOPPED', 'generation_stopped'), markHostGenerationEnd);
+    source.on(resolveHostEventName(ctx, 'GENERATION_ENDED', 'generation_ended'), markHostGenerationEnd);
+    source.on(resolveHostEventName(ctx, 'MESSAGE_EDITED', 'message_edited'), bumpHostMutSeq);
+    source.on(resolveHostEventName(ctx, 'MESSAGE_SWIPED', 'message_swiped'), bumpHostMutSeq);
+    // 酒馆助手 ts_edit / JS-Runner 等程序化编辑只发 MESSAGE_UPDATED（不发 EDITED），
+    // /role /name 与编辑取消也走这里：漏订会让「替换后脚本改正文」被当成替换吞掉。
+    // 取消编辑会误前进计数 → 该轮替换不被吸收、多追一次，方向安全。
+    // 宿主 setChatMessages(refresh:'affected') 只发 *_MESSAGE_RENDERED，替换写回
+    // 本身不会误触发本计数。
+    source.on(resolveHostEventName(ctx, 'MESSAGE_UPDATED', 'message_updated'), bumpHostMutSeq);
+  } catch (error) {
+    console.warn('[BS BioTracker] 無法訂閱宿主生成/編輯事件', error);
+  }
+}
+
+function hostDatasetGenerating() {
+  try {
+    return globalThis.document?.body?.dataset?.generating === 'true';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 宿主主生成是否仍在进行（不该发追踪）：停止按钮 DOM 旗标与未闭合的
+ * generation started 两源并集，任一即忙；事件源带超时自愈。
+ * 特意不含任何「插件级 fetch 观测」信号：数据库正文替换/填表的请求体常嵌着
+ * 含 <UpdateVariable> 的正文，会被 MVU 特征误命中，把它们当作忙碌会把追踪
+ * 排到整条数据库后处理之后（TT 实测拖出约两分钟的延迟）。MVU 额外模型解析
+ * 的等待由既有的兼容门控 shouldWaitForMvuExtraAnalysis 负责（TT 上它走带停止
+ * 按钮的 Generate 管线，dataset 信号同样会覆盖其在飞阶段），兼容开关语义不动。
+ */
+export function getHostBusyDetail(ctx) {
+  void ctx;
+  // dataset 旗标是停止按钮的权威状态，没有超时自愈：真在生成时必须等，
+  // 卡死时则会一直挡——面板上要能区分它和事件计数
+  if (hostDatasetGenerating()) return { busy: true, source: 'dataset' };
+  if (hostRunState.generationDepth > 0) {
+    const staleMs = Number(globalThis[HOST_BUSY_STALE_MS_KEY]) || 600000;
+    if (Date.now() - hostRunState.generationBusySince > staleMs) {
+      // 漏收 ended（页面切换/宿主早隐藏停止按钮）时不能永久卡死追踪
+      hostRunState.generationDepth = 0;
+      hostRunState.generationBusySince = 0;
+    } else {
+      return { busy: true, source: 'depth', depth: hostRunState.generationDepth };
+    }
+  }
+  return { busy: false, source: '' };
+}
+
+export function isHostGenerationBusy(ctx) {
+  return getHostBusyDetail(ctx).busy;
+}
+
+/** 楼层上正文替换盖的毫秒时间戳；没盖过返回 0。 */
+function readReplacementMarkMs(message) {
+  const raw = Number(message?.extra?.[CONTENT_REPLACEMENT_MARK_KEY]);
+  return Number.isFinite(raw) && raw > 0 ? raw : 0;
+}
+
+function getFloorAnchorFields(message) {
+  return {
+    anchorVersion: 1,
+    // ST/TT 的消息对象没有 id 字段（只有 MVU 的 setChatMessages 形参叫 message_id，
+    // 且那是传参不是落库字段）：有就比对、没有就跳过该项，绝不能以它为必要条件
+    tailMessageId: message?.id === undefined || message?.id === null
+      ? (message?.message_id === undefined || message?.message_id === null ? '' : String(message.message_id))
+      : String(message.id),
+    tailSwipeId: message?.swipe_id === undefined || message?.swipe_id === null ? '' : String(message.swipe_id),
+    tailName: String(message?.name || ''),
+    // 盖锚时刻的编辑计数与当时已见的替换戳值：吸收要求「之后没有编辑事件」
+    // 且「戳值相对锚点前进过」——只认戳晚于回执会把「替换后的手动编辑」一起吞掉
+    hostMutSeq: hostRunState.mutSeq,
+    replacementStamp: readReplacementMarkMs(message),
+    // 内存侧锚点时刻（在飞比对用）；快照持久化侧用 createdAt
+    stampedAt: Date.now(),
+  };
+}
+
+function sameFloorIdentity(stamp, currentFloor) {
+  if (!currentFloor) return false;
+  // id 两边都有才比：都没有（ST/TT 真机常态）时不以此拒绝
+  const stampId = String(stamp?.tailMessageId || '');
+  const currentId = String(currentFloor.id ?? currentFloor.message_id ?? '');
+  if (stampId && currentId && stampId !== currentId) return false;
+  if (String(currentFloor.swipe_id ?? '') !== String(stamp?.tailSwipeId ?? '')) return false;
+  // 旧快照没有 tailName 时跳过该项（v1 锚点继续有效，不做版本迁移）
+  const stampName = String(stamp?.tailName || '');
+  if (stampName && String(currentFloor.name || '') !== stampName) return false;
+  return true;
+}
+
+/**
+ * 楼层当前的替换戳是否「相对锚点前进过」= 锚点之后确有新的替换写回。
+ * 锚点带 replacementStamp（吸收快照记录了当时已见的戳值）时要求戳值严格大于它
+ * ——戳没前进而内容变了必然不是替换（是编辑或其他写回者），不得吸收；
+ * 旧锚点没有该字段（tracker 回执）时回退「戳晚于锚点时刻」判定。
+ */
+function isReplacementAfter(snapshot, currentFloor) {
+  const stamp = readReplacementMarkMs(currentFloor);
+  if (!stamp) return false;
+  const lastSeen = Number(snapshot?.replacementStamp);
+  if (Number.isFinite(lastSeen) && lastSeen > 0) return stamp > lastSeen;
+  const anchorAtMs = Number(snapshot?.createdAt) || Number(snapshot?.stampedAt);
+  if (!anchorAtMs) return false;
+  return stamp > anchorAtMs;
+}
+
+function findReplacementAnchorSnapshot(chatState, count) {
+  const snapshots = Array.isArray(chatState?.snapshots) ? chatState.snapshots : [];
+  for (let index = snapshots.length - 1; index >= 0; index -= 1) {
+    const snapshot = snapshots[index];
+    const reason = String(snapshot?.reason || '');
+    if (reason !== 'tracker' && reason !== 'silent_replace') continue;
+    if (Number(snapshot?.messageCount) !== count) continue;
+    return snapshot;
+  }
+  return null;
+}
+
+/**
+ * 数据库正文替换的静默吸收：追踪回执所在楼层带着「相对锚点前进过的替换戳」、
+ * 且锚点之后没有编辑/抽卡事件时，就地重锚快照与 lastProcessedSignature，
+ * 下一轮不再发出追踪请求。返回 true = 本轮轮询已被吸收。恒生效、无开关、无提示。
+ * 只认「戳晚于回执」会把「替换后用户又手动编辑」一起吞掉（编辑不动戳），
+ * 因此编辑事件计数与戳值前进是必要条件；两者皆有持久化，跨重载成立。
+ */
+export function tryAdoptSilentTailReplacement(ctx, settings, chatState) {
+  hydrateHostMutSeq(settings);
+  const chat = getHostChat(ctx);
+  const count = chat.length;
+  if (count <= 0) return false;
+  const last = chat[count - 1];
+  if (!last || last.is_user) return false;
+  if (!readReplacementMarkMs(last)) return false;
+  const currentSignature = buildSignature(ctx, count);
+  if (currentSignature && currentSignature === String(chatState?.lastProcessedSignature || '')) return false;
+  const snapshot = findReplacementAnchorSnapshot(chatState, count);
+  if (!snapshot || Number(snapshot.anchorVersion) !== 1) return false;
+  if (!sameFloorIdentity(snapshot, last)) return false;
+  if (!isReplacementAfter(snapshot, last)) return false;
+  const stampSeq = Number(snapshot.hostMutSeq);
+  if (Number.isFinite(stampSeq) && stampSeq >= 0 && hostRunState.mutSeq > stampSeq) return false;
+  if (isHostGenerationBusy(ctx)) return false;
+  settings.hostMutSeqCounter = hostRunState.mutSeq;
+  recordChatStateSnapshot(ctx, chatState, {
+    messageCount: count,
+    reason: 'silent_replace',
+    ...getFloorAnchorFields(last),
+  });
+  chatState.lastProcessedSignature = currentSignature;
+  saveSettings(ctx);
+  console.debug('[BS BioTracker] 偵測到正文替換回寫（替换戳前进且无编辑事件），已重新锚定，未重發請求');
+  return true;
 }
 
 function getVitalityLevelText(level) {
@@ -402,8 +677,8 @@ function getPsyStressLevelText(level) {
 function getTendencyAngleText(angle) {
   const value = Number(angle);
   if (!Number.isFinite(value)) return '未知';
-  if ((value >= 0 && value <= 15) || (value >= 345 && value <= 360)) return '正位(↓)';
-  if ((value >= 165 && value <= 195)) return '倒位(↑)';
+  if ((value >= 0 && value <= 15) || (value >= 345 && value <= 360)) return '头位(头朝下)';
+  if ((value >= 165 && value <= 195)) return '臀位(臀部朝下)';
   if ((value >= 75 && value <= 105)) return '横位(←)';
   if ((value >= 255 && value <= 285)) return '横位(→)';
   if (value > 15 && value < 75) return '斜位(↗)';
@@ -419,39 +694,41 @@ function getDiaryRecentLimit(settings, characterCount) {
   return characterCount > 1 ? Math.max(1, Math.floor(singleLimit / 2)) : singleLimit;
 }
 
-function hasPreparedWardrobe(existingState = {}) {
-  return Object.values(existingState || {}).some((item) => item?.profile?.wardrobe?.enabled === true);
-}
-
 export function hasBreedingPsychology(existingState = {}) {
   return Object.values(existingState || {}).some((item) => {
+    if (item?.profile?.psychology?.enabled) return true;
     const stageProfiles = item?.profile?.psychology?.stageProfiles;
     return stageProfiles && typeof stageProfiles === 'object' && !Array.isArray(stageProfiles)
       && Object.keys(stageProfiles).length > 0;
   });
 }
 
-/** 与 applyRuptureMembranes 允许的阶段一致：更早的阶段羊膜恒不破 */
-function hasRupturableStage(existingState = {}) {
+function hasAnyFetus(existingState = {}) {
   return Object.values(existingState || {}).some((item) => (
-    ['产兆前驱', '第一产程', '第二产程'].includes(String(item?.profile?.base?.stage || ''))
+    Array.isArray(item?.profile?.pregnant?.fetuses) && item.profile.pregnant.fetuses.length > 0
   ));
 }
 
 export function getTrackerToolDefinitions(settings, existingState = {}) {
   const diaryEnabled = Math.max(0, Math.min(20, Math.floor(Number(settings?.diaryRecentLimit) || 0))) > 0;
-  const wardrobeEnabled = hasPreparedWardrobe(existingState);
+  const wardrobeEnabled = isWardrobeSystemEnabled(settings);
+  const skillEnabled = isSkillSystemEnabled(settings);
   const psychologyEnabled = hasBreedingPsychology(existingState);
   const hiddenTools = new Set();
   if (!diaryEnabled) hiddenTools.add('bsWriteDiary');
   if (!psychologyEnabled) hiddenTools.add('bsUpdatePsychology');
-  // 破水只在产兆前驱与前两个产程有意义；平时挂着只是占用模型的注意力
-  if (!hasRupturableStage(existingState)) hiddenTools.add('bsRuptureMembranes');
+  // 胎位操作只对体内有胎儿的角色有意义
+  if (!hasAnyFetus(existingState)) hiddenTools.add('bsAssistFetalPosition');
   if (!wardrobeEnabled) {
     hiddenTools.add('bsAddWardrobeItem');
     hiddenTools.add('bsRemoveWardrobeItem');
     hiddenTools.add('bsChangeOutfit');
   }
+  if (!skillEnabled) {
+    hiddenTools.add('bsRegisterSkillDefinition');
+    hiddenTools.add('bsTrainSkill');
+  }
+  for (const name of getDisabledSpecialToolNames(settings)) hiddenTools.add(name);
   return TOOL_DEFINITIONS.filter((tool) => !hiddenTools.has(tool?.name));
 }
 
@@ -486,6 +763,44 @@ function getPromptFacingMetabolismSymptoms(pregnant = {}) {
   return result;
 }
 
+function getAmnionTag(durability) {
+  if (durability <= 0) return '已破';
+  if (durability <= 33) return '膜危';
+  if (durability <= 66) return '膜薄';
+  return '完整';
+}
+
+/**
+ * 每胎羊膜的精确耐久只留在引擎与 UI。可见胎囊全部相同时只送一个 amnionDurability；
+ * 出现差异时不送母体层数值，改在「非完整」的胎儿上标 膜薄／膜危／已破。
+ */
+function getPromptFacingAmnion(pregnant, visibleFetuses) {
+  const values = new Map();
+  for (const fetus of visibleFetuses) {
+    const durability = getFetusAmnionDurability(pregnant, fetus);
+    if (durability !== null) values.set(fetus, Math.round(durability));
+  }
+  const distinct = new Set(values.values());
+  if (distinct.size <= 1) return { uniform: distinct.size === 1 ? [...distinct][0] : null, tags: new Map() };
+  const tags = new Map();
+  for (const [fetus, durability] of values) {
+    const tag = getAmnionTag(durability);
+    if (tag !== '完整') tags.set(fetus, tag);
+  }
+  return { uniform: null, tags };
+}
+
+/** 延产过才送延产次数；还在延产期才送到期日（有效孕日） */
+function getPromptFacingExtensionState(pregnant = {}) {
+  const count = Math.max(0, Math.floor(Number(pregnant.extensionCount) || 0));
+  if (count <= 0) return {};
+  const until = pregnant.extensionUntilDays;
+  return {
+    extensionCount: count,
+    ...(until !== null && until !== undefined && Number.isFinite(Number(until)) ? { extensionUntilDays: Number(until) } : {}),
+  };
+}
+
 function getPromptFacingLaborState(base = {}, pregnant = {}) {
   const stage = String(base.stage || '');
   if (stage !== '产兆前驱' && !LABOR_STAGES.includes(stage)) return {};
@@ -493,7 +808,7 @@ function getPromptFacingLaborState(base = {}, pregnant = {}) {
     laborHours: Number.isFinite(Number(pregnant.laborHours)) ? Number(pregnant.laborHours) : 0,
     effectiveLaborHours: Number.isFinite(Number(pregnant.effectiveLaborHours)) ? Number(pregnant.effectiveLaborHours) : 0,
     laborPhase: pregnant.laborPhase ?? null,
-    laborFetusIndex: Number.isFinite(Number(pregnant.laborFetusIndex)) ? Number(pregnant.laborFetusIndex) : 0,
+    laborBirthNumber: Number.isFinite(Number(pregnant.laborBirthNumber)) ? Number(pregnant.laborBirthNumber) : 0,
     laborPain: Number.isFinite(Number(pregnant.laborPain)) ? Number(pregnant.laborPain) : 0,
   };
 }
@@ -504,7 +819,7 @@ function getOutfitCurrentWearText(profile) {
   if (!wardrobe?.enabled || !outfit || typeof outfit !== 'object') return '';
   const availableItems = [
     ...(Array.isArray(wardrobe.items) ? wardrobe.items : []),
-    ...(Array.isArray(outfit.temporaryItems) ? outfit.temporaryItems : []),
+    ...(Array.isArray(outfit.transientItems) ? outfit.transientItems : []),
   ];
   const findItem = (id) => availableItems.find((entry) => entry?.id === id) || null;
   const itemName = (id) => {
@@ -512,14 +827,18 @@ function getOutfitCurrentWearText(profile) {
     if (found?.name) return String(found.name);
     return id === 0 ? '全裸' : `未知衣物#${id}`;
   };
-  const mainId = outfit.mainItemId ?? 0;
+  const mainId = outfit.mainItemId ?? null;
   const wearState = sanitizeWearState(outfit.wearState);
   const stateSuffix = wearState !== DEFAULT_WEAR_STATE ? `（${wearState}）` : '';
   const accessoryIds = Array.isArray(outfit.accessoryItemIds) ? outfit.accessoryItemIds : [];
   const innerNames = [];
   const outerNames = [];
   for (const id of accessoryIds) {
-    (findItem(id)?.layer === 'inner' ? innerNames : outerNames).push(itemName(id));
+    (findItem(id)?.category === 'underwear' ? innerNames : outerNames).push(itemName(id));
+  }
+  if (mainId === null) {
+    const accessories = [...innerNames, ...outerNames];
+    return accessories.length > 0 ? `衣着未记录；已知配件：${accessories.join(' + ')}` : '衣着未记录';
   }
   if (mainId === 0 && (innerNames.length > 0 || outerNames.length > 0)) {
     return `仅着：${[...innerNames, ...outerNames].join(' + ')}${stateSuffix}`;
@@ -533,7 +852,7 @@ function buildSlimWardrobeItem(entry) {
     id: entry?.id,
     name: entry?.name,
     slot: entry?.slot,
-    ...(entry?.layer ? { layer: entry.layer } : {}),
+    ...(entry?.category ? { category: entry.category } : {}),
   };
 }
 
@@ -554,11 +873,13 @@ function buildNarrativeWardrobeItem(entry) {
     slot: entry?.slot,
     note: entry?.note,
     ...(Array.isArray(entry?.parts) && entry.parts.length > 0 ? { parts: entry.parts } : {}),
-    ...(entry?.layer ? { layer: entry.layer } : {}),
+    ...(entry?.fitProfile ? { fitProfile: entry.fitProfile } : {}),
+    ...(entry?.category ? { category: entry.category } : {}),
+    ...(Array.isArray(entry?.effects) ? { effects: entry.effects } : {}),
   };
 }
 
-function buildPromptFacingCharacterState(item, diaryLimit = 0) {
+function buildPromptFacingCharacterState(item, diaryLimit = 0, wardrobeOn = true, minutesPassed = 0) {
   const next = cloneValue(item);
   const profile = next?.profile || {};
   const base = profile.base || {};
@@ -573,22 +894,37 @@ function buildPromptFacingCharacterState(item, diaryLimit = 0) {
     vitalityLevelText: getVitalityLevelText(base.vitalityLevel),
     psyStressLevelText: getPsyStressLevelText(base.psyStressLevel),
   };
+  // 子宫乏力只在反复延产后才有；没有就不送
+  if (!(Number(base.uterineAtony) > 0)) delete profile.base.uterineAtony;
 
   if (!sendPregnantState) {
     delete profile.pregnant;
   } else if (Array.isArray(pregnant.fetuses)) {
+    const visibleFetuses = pregnant.fetuses.filter(isFetusKnownToCharacter);
+    const amnion = getPromptFacingAmnion(pregnant, visibleFetuses);
     profile.pregnant = {
       pregnantDays: Number.isFinite(Number(pregnant.pregnantDays)) ? Number(pregnant.pregnantDays) : 0,
       effectivePregnantDays: Number.isFinite(Number(pregnant.effectivePregnantDays)) ? Number(pregnant.effectivePregnantDays) : 0,
       ...getPromptFacingLaborState(base, pregnant),
-      amnionDurability: Number.isFinite(Number(pregnant.amnionDurability)) ? Number(pregnant.amnionDurability) : 0,
-      ...(hasFetuses ? { nutrition: Number.isFinite(Number(pregnant.nutrition)) ? Number(pregnant.nutrition) : 0 } : {}),
-      ...(hasFetuses ? { symptomReliefPending: Number.isFinite(Number(pregnant.symptomReliefPending)) ? Number(pregnant.symptomReliefPending) : 0 } : {}),
-      ...getPromptFacingMetabolismSymptoms(pregnant),
-      fetuses: pregnant.fetuses.filter(isFetusKnownToCharacter).map((fetus) => {
-        const { embryoId: _embryoId, fusionCheckedWith: _fusionCheckedWith, ...visibleFetus } = fetus;
+      ...getPromptFacingExtensionState(pregnant),
+      ...(amnion.uniform === null ? {} : { amnionDurability: amnion.uniform }),
+      ...(hasFetuses && !immune.metabolism ? { nutrition: getPregnancyNutritionTotal(pregnant) } : {}),
+      ...(immune.metabolism ? {} : getPromptFacingMetabolismSymptoms(pregnant)),
+      fetuses: visibleFetuses.map((fetus) => {
+        const {
+          embryoId: _embryoId, contactIds: _contactIds, contactMinutes: _contactMinutes, contactEmbryos: _contactEmbryos, fusionCheckedWith: _fusionCheckedWith, nutrition: _nutrition, amnionDurability: _amnion,
+          // 位置只送紧凑的文字摘要（positionText）；数值、解绑与阻塞旗标不外露
+          descentStage: _descentStage, nestedReleased: _nestedReleased, backSide: _backSide,
+          inletIntruder: _inletIntruder, shoulderDystocia: _shoulderDystocia, shoulderRelieved: _shoulderRelieved, ...visibleFetus
+        } = fetus;
         return {
           ...visibleFetus,
+          ...(LABOR_STAGES.includes(String(base.stage || '')) && fetus.embryoId === pregnant.presentingEmbryoId ? { presenting: true } : {}),
+          positionText: describeFetalPosition(pregnant, fetus),
+          ...(describeBackSide(fetus) ? { backSideText: describeBackSide(fetus) } : {}),
+          // 没有伴生卵就不送，省 token 也免得模型以为要描写 0 枚卵
+          companionEggCount: Number(fetus?.companionEggCount) > 0 ? Number(fetus.companionEggCount) : undefined,
+          ...(amnion.tags.has(fetus) ? { amnion: amnion.tags.get(fetus) } : {}),
           tendencyAngleText: getTendencyAngleText(fetus?.tendencyAngle),
           race: undefined,
         };
@@ -599,8 +935,7 @@ function buildPromptFacingCharacterState(item, diaryLimit = 0) {
       pregnantDays: Number.isFinite(Number(pregnant.pregnantDays)) ? Number(pregnant.pregnantDays) : 0,
       effectivePregnantDays: Number.isFinite(Number(pregnant.effectivePregnantDays)) ? Number(pregnant.effectivePregnantDays) : 0,
       ...getPromptFacingLaborState(base, pregnant),
-      amnionDurability: Number.isFinite(Number(pregnant.amnionDurability)) ? Number(pregnant.amnionDurability) : 0,
-      ...getPromptFacingMetabolismSymptoms(pregnant),
+      ...(immune.metabolism ? {} : getPromptFacingMetabolismSymptoms(pregnant)),
       fetuses: [],
     };
   }
@@ -630,19 +965,70 @@ function buildPromptFacingCharacterState(item, diaryLimit = 0) {
 
   if (profile.wardrobe?.enabled && profile.outfit && typeof profile.outfit === 'object') {
     profile.outfit.currentWearText = getOutfitCurrentWearText(profile);
-    if (!isWearFitWindowActive(base)) {
-      profile.wardrobe.items = (Array.isArray(profile.wardrobe.items) ? profile.wardrobe.items : []).map(buildNarrativeWardrobeItem);
-      if (Array.isArray(profile.outfit.temporaryItems)) {
-        profile.outfit.temporaryItems = profile.outfit.temporaryItems.map((entry) => ({ ...buildNarrativeWardrobeItem(entry), source: entry?.source }));
-      }
-    }
+    const wardrobeItems = Array.isArray(profile.wardrobe.items) ? profile.wardrobe.items : [];
+    const transientItems = Array.isArray(profile.outfit.transientItems) ? profile.outfit.transientItems : [];
+    const currentIds = new Set([
+      ...(profile.outfit.mainItemId === null || profile.outfit.mainItemId === undefined ? [] : [profile.outfit.mainItemId]),
+      ...(Array.isArray(profile.outfit.accessoryItemIds) ? profile.outfit.accessoryItemIds : []),
+    ]);
+    profile.outfit.currentItems = [...wardrobeItems, ...transientItems]
+      .filter((entry) => currentIds.has(entry?.id))
+      .map((entry) => {
+        const narrative = buildNarrativeWardrobeItem(entry);
+        return isWearFitWindowActive(base)
+          ? { ...narrative, masking: entry?.masking, support: entry?.support, capacity: entry?.capacity, convenience: entry?.convenience }
+          : narrative;
+      });
+    profile.wardrobe.items = wardrobeItems.map(buildSlimWardrobeItem);
+    profile.outfit.transientItems = transientItems.map((entry) => ({ ...buildSlimWardrobeItem(entry), source: entry?.source }));
   }
 
+  if (!wardrobeOn) {
+    delete profile.wardrobe;
+    delete profile.outfit;
+  }
+  // 孕态描述只在妊娠相关阶段有用；月经阶段照送等于每人白占一两百 token
+  if (!sendPregnantState && profile.descriptions) delete profile.descriptions.pregnantDescription;
+  // 存档是带 updatedAt 的阵列；模型只看 { 字段名: 内容 }，另附超过一天没更新的字段名供点名
+  if (profile.descriptions && typeof profile.descriptions === 'object') {
+    const stale = {};
+    for (const field of DESCRIPTION_FIELDS) {
+      if (profile.descriptions[field] === undefined) continue;
+      const names = getStaleDescriptionFields(profile.descriptions[field], minutesPassed);
+      if (names.length > 0) stale[field] = names;
+      profile.descriptions[field] = descriptionListToObject(profile.descriptions[field]);
+    }
+    if (Object.keys(stale).length > 0) profile.staleDescriptionFields = stale;
+  }
+
+  if (pregnant.noticeSample && base.isHere !== false) {
+    // Existing gestational clocks include the LMP offset; natural cues use post-conception age.
+    const age = Math.max(0, Number(pregnant.effectivePregnantDays) - (pregnant.noticeSample.obstetricOffsetDays ?? 14));
+    const count = (pregnant.fetuses || []).filter((x) => !x.nestedInEmbryoId && !x.pendingImplantation).length;
+    if (age >= naturalNoticeDays(pregnant.noticeSample, count)) profile.naturalPregnancyCue = '现在较容易注意到妊娠相关自然线索；是否察觉、误解或拒信依剧情，不自动确认怀孕。';
+  }
+  delete profile.pregnant?.noticeSample;
+  delete profile.pregnant?.experienceBeforePregnancy;
+  profile.cognitionRecords = (profile.cognitionRecords || []).map(({ time, method, content, sequence, minutesPassed, storyDayIndex }) =>
+    ({ time, method, content, sequence, minutesPassed, storyDayIndex }));
+  delete profile.reproductiveOperations;
+  delete profile.reproductiveMigration;
+  delete profile.base?.spermContacts;
+  delete profile.base?.nextSpermContactId;
   delete profile.bio;
-  delete profile.immune;
+  // immune 只留 metabolism 一项：prompt 据此不发本人的需求与衍生需求说明
+  if (immune.metabolism) profile.immune = { metabolism: true };
+  else delete profile.immune;
   delete profile.cooldown;
+  delete profile.visualCue;
   if (immune.metabolism) delete profile.metabolism;
   if (!hasBreedingPsychology({ current: item })) delete profile.psychology;
+  else {
+    const side = psychologySide(base.stage);
+    const psychology = profile.psychology || {};
+    profile.psychology = side ? { activeSide: side, pendingSide: psychology.pendingSide,
+      [side]: psychology[side] || {} } : undefined;
+  }
   profile.diary = getRecentDiaryEntries(item?.profile || {}, diaryLimit);
 
   delete next.updatedAt;
@@ -652,11 +1038,12 @@ function buildPromptFacingCharacterState(item, diaryLimit = 0) {
   return next;
 }
 
-function buildOffscreenCharacterState(item, diaryLimit = 0) {
+function buildOffscreenCharacterState(item, diaryLimit = 0, wardrobeOn = true) {
   const profile = item?.profile || {};
   const base = profile.base || {};
   const pregnant = profile.pregnant || {};
   const notify = profile.notify || {};
+  const metabolismImmune = profile.immune?.metabolism === true;
   const hasFetuses = Array.isArray(pregnant.fetuses) && pregnant.fetuses.length > 0;
   const sendPregnantState = shouldSendPregnantState(base, pregnant);
   return {
@@ -677,21 +1064,23 @@ function buildOffscreenCharacterState(item, diaryLimit = 0) {
           pregnantDays: pregnant.pregnantDays ?? 0,
           effectivePregnantDays: pregnant.effectivePregnantDays ?? 0,
           ...getPromptFacingLaborState(base, pregnant),
+          ...getPromptFacingExtensionState(pregnant),
           fetusesCount: hasFetuses ? pregnant.fetuses.filter(isFetusKnownToCharacter).length : 0,
-          ...getPromptFacingMetabolismSymptoms(pregnant),
+          ...(metabolismImmune ? {} : getPromptFacingMetabolismSymptoms(pregnant)),
         },
       } : {}),
-      ...(profile.wardrobe?.enabled ? {
+      ...(metabolismImmune ? { immune: { metabolism: true } } : {}),
+      ...(wardrobeOn && profile.wardrobe?.enabled ? {
         wardrobe: {
           enabled: true,
           items: (Array.isArray(profile.wardrobe.items) ? profile.wardrobe.items : []).map(buildSlimWardrobeItem),
         },
         outfit: {
-          mainItemId: profile.outfit?.mainItemId ?? 0,
+          mainItemId: profile.outfit?.mainItemId ?? null,
           accessoryItemIds: Array.isArray(profile.outfit?.accessoryItemIds) ? [...profile.outfit.accessoryItemIds] : [],
           wearState: sanitizeWearState(profile.outfit?.wearState),
-          ...(Array.isArray(profile.outfit?.temporaryItems) && profile.outfit.temporaryItems.length > 0
-            ? { temporaryItems: profile.outfit.temporaryItems.map(buildSlimWardrobeItem) }
+          ...(Array.isArray(profile.outfit?.transientItems) && profile.outfit.transientItems.length > 0
+            ? { transientItems: profile.outfit.transientItems.map(buildSlimWardrobeItem) }
             : {}),
           currentWearText: getOutfitCurrentWearText(profile),
         },
@@ -705,13 +1094,56 @@ function buildOffscreenCharacterState(item, diaryLimit = 0) {
   };
 }
 
-function buildTrackerStateView(existingState, settings = null) {
+/** 空值要保留的栏位：outfit.mainItemId=null 表示「衣着未记录」，与省略不同 */
+const KEEP_EMPTY_KEYS = new Set(['mainItemId']);
+
+/**
+ * 删掉值为 null、空字串、空阵列或空物件的栏位（递回）；阵列元素本身不删，下标不变。
+ * 多人时这些预设空值每人都要占几十 token，省略即代表「无」
+ */
+function pruneEmptyFields(value) {
+  if (Array.isArray(value)) return value.map(pruneEmptyFields);
+  if (!value || typeof value !== 'object') return value;
+  const out = {};
+  for (const [key, raw] of Object.entries(value)) {
+    const next = pruneEmptyFields(raw);
+    const empty = next === null || next === undefined || next === ''
+      || (Array.isArray(next) && next.length === 0)
+      || (typeof next === 'object' && next !== null && !Array.isArray(next) && Object.keys(next).length === 0);
+    if (empty && !KEEP_EMPTY_KEYS.has(key)) continue;
+    out[key] = next;
+  }
+  return out;
+}
+
+/** 技能系统关闭时，技能、天赋与技能纪录一律不送（角色、胎儿、孩子都一样），资料本身保留 */
+function stripSkillFields(view) {
+  const profile = view?.profile;
+  if (!profile || typeof profile !== 'object') return view;
+  delete profile.skills;
+  delete profile.talents;
+  delete profile.skillHistory;
+  delete profile.childSource;
+  for (const fetus of (Array.isArray(profile.pregnant?.fetuses) ? profile.pregnant.fetuses : [])) {
+    if (fetus && typeof fetus === 'object') delete fetus.talents;
+  }
+  for (const child of (Array.isArray(profile.children) ? profile.children : [])) {
+    if (child && typeof child === 'object') delete child.talents;
+  }
+  return view;
+}
+
+function buildTrackerStateView(existingState, settings = null, minutesPassed = 0) {
   const characterCount = Object.keys(existingState || {}).length;
   const diaryLimit = getDiaryRecentLimit(settings, characterCount);
+  const wardrobeOn = isWardrobeSystemEnabled(settings);
+  const skillOn = isSkillSystemEnabled(settings);
   return Object.fromEntries(
     Object.entries(existingState).map(([name, item]) => {
-      if (item?.profile?.base?.isHere === false) return [name, buildOffscreenCharacterState(item, diaryLimit)];
-      return [name, buildPromptFacingCharacterState(item, diaryLimit)];
+      const view = item?.profile?.base?.isHere === false
+        ? buildOffscreenCharacterState(item, diaryLimit, wardrobeOn)
+        : buildPromptFacingCharacterState(item, diaryLimit, wardrobeOn, minutesPassed);
+      return [name, pruneEmptyFields(skillOn ? view : stripSkillFields(view))];
     }),
   );
 }
@@ -756,19 +1188,6 @@ function formatGlobalWorldbookSelectionName(bookName, entryName) {
   return `${String(bookName || '').trim()} :: ${String(entryName || '').trim()}`;
 }
 
-function normalizeWorldbookKeywords(value) {
-  if (Array.isArray(value)) return value.map((item) => String(item || '').trim()).filter(Boolean);
-  if (typeof value === 'string') return value.split(/[\r\n,]+/).map((item) => item.trim()).filter(Boolean);
-  return [];
-}
-
-function buildWorldbookActivationText(recentMessages = []) {
-  return (Array.isArray(recentMessages) ? recentMessages : [])
-    .map((message) => `${message?.name || ''}\n${message?.text || ''}`)
-    .join('\n')
-    .toLowerCase();
-}
-
 function projectWorldbookEntryForTracker(entry) {
   if (!entry || typeof entry !== 'object') return null;
   const content = entry.content ?? entry.text ?? entry.value ?? '';
@@ -781,47 +1200,14 @@ function projectWorldbookEntryForTracker(entry) {
     content,
   };
 }
-
-function getWorldbookEntryActivationMode(entry) {
-  const mode = String(entry?.activationMode || '').trim().toLowerCase();
-  if (mode) return mode;
-  if (entry?.constant === true || entry?.always === true) return 'always';
-  if (entry?.selective === true || normalizeWorldbookKeywords(entry?.key).length > 0 || normalizeWorldbookKeywords(entry?.keys).length > 0) return 'keyword';
-  return '';
-}
-
-function worldbookKeywordMatches(entry, activationText) {
-  if (!activationText) return false;
-  const primaryKeys = [
-    ...normalizeWorldbookKeywords(entry?.key),
-    ...normalizeWorldbookKeywords(entry?.keys),
-  ];
-  if (primaryKeys.length === 0) return false;
-  const primaryMatched = primaryKeys.some((keyword) => activationText.includes(keyword.toLowerCase()));
-  if (!primaryMatched) return false;
-
-  const secondaryKeys = [
-    ...normalizeWorldbookKeywords(entry?.keysecondary),
-    ...normalizeWorldbookKeywords(entry?.keySecondary),
-    ...normalizeWorldbookKeywords(entry?.secondary_keys),
-    ...normalizeWorldbookKeywords(entry?.secondaryKeys),
-  ];
-  if (entry?.selective === true && secondaryKeys.length > 0) {
-    return secondaryKeys.some((keyword) => activationText.includes(keyword.toLowerCase()));
-  }
-  return true;
-}
-
 function filterTrackerWorldbookEntries(value, excludedNames, settings = null, recentMessages = [], options = {}) {
-  if (!value || typeof value !== 'object') return value;
+  if (!value || typeof value !== 'object') return null;
   const mode = normalizeWorldbookMode(settings?.trackerWorldbookMode);
   const globalBookName = String(options.globalBookName || '').trim();
   // characterScopeLists：附加知识书带书名前缀，但白名单仍走角色侧名单
   const includedNames = globalBookName && options.characterScopeLists !== true
     ? parseTrackerGlobalWorldbookIncludeNames(settings)
     : parseTrackerWorldbookIncludeNames(settings);
-  const activationText = mode === 'mainflow' ? buildWorldbookActivationText(recentMessages) : '';
-
   const normalizeEntryName = (entry) => getWorldbookEntryDisplayName(entry);
 
   const keepEntry = (entry) => {
@@ -830,39 +1216,45 @@ function filterTrackerWorldbookEntries(value, excludedNames, settings = null, re
     if (mode === 'allowlist_all') return Boolean(name) && worldbookSelectionMatches(includedNames, selectionName, name);
     if (entry?.enabled === false || entry?.disable === true) return false;
     if (name && worldbookSelectionMatches(excludedNames, selectionName, name)) return false;
-    if (mode === 'mainflow') {
-      const activationMode = getWorldbookEntryActivationMode(entry);
-      if (activationMode === 'always' || activationMode === 'constant') return true;
-      if (activationMode === 'keyword' || activationMode === 'selective') return worldbookKeywordMatches(entry, activationText);
-      return false;
-    }
-    if (!excludedNames || excludedNames.size === 0) return true;
-    return true;
+    const activationMode = getWorldbookEntryActivationMode(entry);
+    // 旧版角色卡中的简化条目没有任何 ST 激活字段；本仓库此前按排除模式
+    // 将这类条目视为普通背景。继续兼容这种已存在的卡片形状，但仍遵守
+    // 明确的 enabled/disable 与排除名单。
+    if (!activationMode
+      && entry?.activationMode === undefined
+      && entry?.constant === undefined
+      && entry?.always === undefined
+      && entry?.selective === undefined
+      && entry?.key === undefined
+      && entry?.keys === undefined) return true;
+    if (activationMode === 'always' || activationMode === 'constant') return true;
+    if (activationMode === 'keyword' || activationMode === 'selective') return worldbookEntryKeywordsMatch(entry, recentMessages);
+    return false;
   };
 
-  if (Array.isArray(value.entries)) {
-    const entries = value.entries
-      .filter(keepEntry)
-      .map((entry) => projectWorldbookEntryForTracker(entry))
-      .filter(Boolean);
+  const projected = projectWorldbook(value, keepEntry);
+  if (!projected) return null;
+  const projectEntries = (entries) => Array.isArray(entries)
+    ? entries.map((entry) => projectWorldbookEntryForTracker(entry)).filter(Boolean)
+    : Object.fromEntries(Object.entries(entries || {})
+      .map(([key, entry]) => [key, projectWorldbookEntryForTracker(entry)])
+      .filter(([, entry]) => entry));
+  if (Array.isArray(projected)) return projectEntries(projected);
+  if (Array.isArray(projected.entries)) {
     return {
-      name: String(value.name || globalBookName || '').trim(),
-      entries,
+      ...projected,
+      name: String(projected.name || globalBookName || '').trim(),
+      entries: projectEntries(projected.entries),
     };
   }
-
-  if (value.entries && typeof value.entries === 'object') {
-    const entries = Object.entries(value.entries)
-      .filter(([, entry]) => keepEntry(entry))
-      .map(([, entry]) => projectWorldbookEntryForTracker(entry))
-      .filter(Boolean);
+  if (projected.entries && typeof projected.entries === 'object') {
     return {
-      name: String(value.name || globalBookName || '').trim(),
-      entries,
+      ...projected,
+      name: String(projected.name || globalBookName || '').trim(),
+      entries: projectEntries(projected.entries),
     };
   }
-
-  return value;
+  return null;
 }
 
 async function getFilteredGlobalWorldbooks(ctx, settings, recentMessages = []) {
@@ -941,11 +1333,32 @@ export function getMainflowContextSnapshot(ctx, settings = null) {
   };
 }
 
-export function buildTrackerPayload(ctx, settings, reason = 'manual', endIndexExclusive = null) {
+/**
+ * 快照是「产生这则回复的那次请求」，保留了主流各扩充处理后的样子，但有两个缺口：
+ * 回复里才触发的条目不在里面、排除名单管不到。用宿主试算这一刻的世界书补上：
+ * 被排除条目的原文从快照删掉，快照里没有的纯文字新触发条目另外附上。
+ */
+async function repairMainflowSnapshotWorldInfo(ctx, settings, payload) {
+  const resolved = await resolveHostWorldInfo(ctx, settings, { collectEntries: true });
+  if (!resolved) return;
+  const { snapshot, stripped, unmatched } = stripExcludedFromSnapshot(ctx, payload.mainflow_context_snapshot, resolved.removedEntries);
+  if (snapshot.messages.length > 0) payload.mainflow_context_snapshot = snapshot;
+  if (unmatched.length > 0) {
+    console.warn(`[BS BioTracker] 这些被排除的条目含模板语法，主流渲染后无法从快照中辨认删除：${unmatched.join('、')}`);
+  }
+  const missing = findWorldInfoMissingFromSnapshot(ctx, payload.mainflow_context_snapshot, resolved);
+  if (missing.length > 0) payload.mainflow_new_worldinfo = missing.map(({ name, content }) => ({ name, content }));
+  if (stripped.length > 0 || missing.length > 0) {
+    console.debug('[BS BioTracker] mainflow snapshot world info repaired', { stripped, added: missing.map((item) => item.name) });
+  }
+}
+
+export function buildTrackerPayload(ctx, settings, reason = 'manual', endIndexExclusive = null, settledBefore = null) {
+  settings = syncCardSettings(ctx, settings);
   const currentCharacter = getCharacterCard(ctx);
   const chatState = getChatState(ctx, settings);
   const existingState = chatState.characters || {};
-  const recentMessages = buildRecentMessages(ctx, settings, endIndexExclusive);
+  const recentMessages = buildRecentMessages(ctx, settings, endIndexExclusive, settledBefore);
   const useMainflowMode = normalizeWorldbookMode(settings?.trackerWorldbookMode) === 'mainflow';
   let mainflowContextSnapshot = useMainflowMode ? getMainflowContextSnapshot(ctx, settings) : null;
   if (mainflowContextSnapshot && settings?.useStPresetForAsync) {
@@ -977,14 +1390,21 @@ export function buildTrackerPayload(ctx, settings, reason = 'manual', endIndexEx
     mainflow_context_snapshot: mainflowContextSnapshot,
     tracked_females: getRegisteredTargetNames(ctx, settings, chatState),
     priority_character_names: getPriorityCharacterNames(ctx, settings, chatState),
-    skill_catalog: Array.isArray(chatState.skillCatalog) ? chatState.skillCatalog : [],
-    existing_state: buildTrackerStateView(existingState, settings),
+    skill_enabled: isSkillSystemEnabled(settings),
+    ...(isSkillSystemEnabled(settings) ? {
+      skill_baseline_prompt: String(chatState.skillBaselinePrompt || '').trim(),
+      skill_catalog: Array.isArray(chatState.skillCatalog) ? chatState.skillCatalog : [],
+    } : {}),
+    existing_state: buildTrackerStateView(existingState, settings, Number(chatState.minutesPassed) || 0),
     available_tools: getTrackerToolDefinitions(settings, existingState),
     diary_enabled: diaryEnabled,
-    race_catalog_enabled: settings?.raceCatalogInPrompt !== false,
-    require_full_description_updates: settings?.requireFullDescriptionUpdates === true,
+    race_catalog_selection: settings?.raceCatalogSelection || null,
+    realistic_world: isRealisticWorld(settings),
+    disabled_special_tools: getDisabledSpecialToolNames(settings),
+    recent_operation_results: (chatState.lastOperationLogs || []).filter((log) => ['bsAddSperm', 'bsAbortion'].includes(log.name) && Object.entries(existingState).some(([name, item]) => name === String(log.arguments?.female || '').trim() && item.profile?.base?.isHere !== false)).map(({ name, applied, message, arguments: args }) => ({ name, female: String(args?.female || '').trim(), applied, message })),
+    world_baseline_prompt: String(settings?.worldBaselinePrompt || '').trim(),
     ...(psychologyEnabled ? { breeding_psychology_enabled: true } : {}),
-    wardrobe_enabled: hasPreparedWardrobe(existingState),
+    wardrobe_enabled: isWardrobeSystemEnabled(settings),
     recent_messages: recentMessages,
   };
 }
@@ -1070,6 +1490,16 @@ function findProcessedResumeCount(ctx, chatState, chatLength) {
   return null;
 }
 
+/** 最近一次实际分析（非 skip 记帐）的快照所涵盖的楼层数；找不到时回 0，等同全部视为新内容 */
+function getLastAnalyzedMessageCount(chatState, upTo) {
+  let best = 0;
+  for (const snapshot of Array.isArray(chatState?.snapshots) ? chatState.snapshots : []) {
+    const count = Number.isInteger(snapshot?.messageCount) ? snapshot.messageCount : 0;
+    if (count <= upTo && count > best && String(snapshot?.reason || '') !== 'skip') best = count;
+  }
+  return best;
+}
+
 function reconcileChatStateSnapshots(ctx, chatState, settings) {
   const matchedSnapshot = getLatestMatchingSnapshot(ctx, chatState);
   if (matchedSnapshot) {
@@ -1116,10 +1546,14 @@ let trackerBusyToast = null;
 function showTrackerBusyToast() {
   if (trackerBusyToast) return;
   try {
-    // timeOut/extendedTimeOut = 0：不自动消失，由本轮结束时显式清掉
-    trackerBusyToast = globalThis.toastr?.info?.('追踪更新中…', '[BS BioTracker]', {
+    // timeOut/extendedTimeOut = 0：不自动消失，由本轮结束时显式清掉。
+    // 点一下就终止本轮（模型陷入超长思维链或网络卡住时不必干等总时限）；
+    // tapToDismiss 关掉，免得误点只是把提示关了、请求却还在跑
+    trackerBusyToast = globalThis.toastr?.info?.('追踪更新中…（点此终止）', '[BS BioTracker]', {
       timeOut: 0,
       extendedTimeOut: 0,
+      tapToDismiss: false,
+      onclick: () => abortActiveApiRequests({ flow: 'tracker' }),
     }) || null;
   } catch {
     trackerBusyToast = null;
@@ -1186,7 +1620,6 @@ function buildStreamingGuardSignature(ctx) {
 }
 
 function isAfterAiMessageSettled(ctx, settings, chatState) {
-  if (settings.triggerTiming !== 'after_ai') return true;
   const chat = getHostChat(ctx);
   const lastMessage = chat[chat.length - 1];
   if (!lastMessage || lastMessage.is_user) {
@@ -1219,10 +1652,10 @@ function isAfterAiMessageSettled(ctx, settings, chatState) {
   return true;
 }
 
-async function processTrackerMessage(ctx, settings, chatState, deps, reason, messageIndex) {
+async function processTrackerMessage(ctx, settings, chatState, deps, reason, messageIndex, settledBefore = null) {
   const chat = getHostChat(ctx);
   const message = chat[messageIndex];
-  const shouldTrigger = reason === 'manual' ? true : shouldTriggerForMessage(settings, message);
+  const shouldTrigger = reason === 'manual' ? true : shouldTriggerForMessage(message);
   if (!shouldTrigger) {
     // 触发时机不符的楼层只记一笔 skip 快照，不发请求；这是纯记帐流程，必须全程静默
     recordChatStateSnapshot(ctx, chatState, { messageCount: messageIndex + 1, reason: 'skip' });
@@ -1234,7 +1667,7 @@ async function processTrackerMessage(ctx, settings, chatState, deps, reason, mes
   // 在 runTracker 开头就亮会让使用者看到「输入时也在追踪」的假象
   showTrackerBusyToast();
 
-  const payload = buildTrackerPayload(ctx, settings, reason, messageIndex + 1);
+  const payload = buildTrackerPayload(ctx, settings, reason, messageIndex + 1, settledBefore);
   const memoryResult = await readMemorySource({
     ctx,
     source: settings.memorySource,
@@ -1267,6 +1700,7 @@ async function processTrackerMessage(ctx, settings, chatState, deps, reason, mes
   if (payload.mainflow_context_snapshot) {
     payload.character_additional_worldbook_names = [];
     payload.global_worldbooks = [];
+    await repairMainflowSnapshotWorldInfo(ctx, settings, payload);
   } else {
     const additionalBooks = await getCharacterAdditionalWorldbooksForTracker(ctx, settings, payload.recent_messages);
     const globalBooks = await getFilteredGlobalWorldbooks(ctx, settings, payload.recent_messages);
@@ -1278,12 +1712,17 @@ async function processTrackerMessage(ctx, settings, chatState, deps, reason, mes
   const attemptedSignature = buildSignature(ctx, messageIndex + 1);
   chatState.lastAttemptedSignature = attemptedSignature;
   saveSettings(ctx);
+  // 记下发出请求那一刻楼层的样子与编辑计数：返回时正文若有变化，用它区分
+  // 「重掷/编辑/删楼的合法改动」与「正文替换的静默改写（替换戳前进且无编辑事件）」
+  hydrateHostMutSeq(settings);
+  const preCallFloorStamp = getFloorAnchorFields(chat[messageIndex]);
   const systemPrompt = buildTrackerSystemPrompt(settings.systemPrompt || DEFAULT_SYSTEM_PROMPT, settings.registryDescriptionGuides || null, payload);
   recordTrackerRequestDebug(systemPrompt, payload);
   const rawResult = await callOpenAICompatible(
     settings,
     payload,
-    systemPrompt
+    systemPrompt,
+    { flow: 'tracker' }
   );
   recordTrackerResultDebug(rawResult);
 
@@ -1298,7 +1737,18 @@ async function processTrackerMessage(ctx, settings, chatState, deps, reason, mes
   } catch (error) {
     console.warn('[BS BioTracker] 分析后刷新聊天视图失败，改用现有视图比对', error);
   }
-  if (buildSignature(ctx, messageIndex + 1) !== attemptedSignature) {
+  const postCallSignature = buildSignature(ctx, messageIndex + 1);
+  // 在飞期间正文被改写：只有「替换戳相对发出时前进、且没有编辑/抽卡事件、
+  // 同楼层同身份」才算正文替换（分析对象仍是替换前正文，结果对剧情有效）——
+  // 沿用结果、就地重锚；替换后又手改（编辑事件）、或重掷/删楼照旧作废整份结果。
+  const currentFloorAfterCall = getHostChat(ctx)[messageIndex];
+  const silentReplacementDuringRun = postCallSignature !== attemptedSignature
+    && getHostChat(ctx).length === messageIndex + 1
+    && sameFloorIdentity(preCallFloorStamp, currentFloorAfterCall)
+    && isReplacementAfter(preCallFloorStamp, currentFloorAfterCall)
+    && hostRunState.mutSeq === preCallFloorStamp.hostMutSeq
+    && !isHostGenerationBusy(ctx);
+  if (postCallSignature !== attemptedSignature && !silentReplacementDuringRun) {
     console.warn('[BS BioTracker] 该消息在分析期间被修改或删除，本次结果已作废');
     chatState.lastRawResult = {
       message: '该消息在分析期间被修改或删除，本次结果已作废，未写入任何状态。',
@@ -1309,21 +1759,68 @@ async function processTrackerMessage(ctx, settings, chatState, deps, reason, mes
     saveSettings(ctx);
     return { discarded: true };
   }
+  if (silentReplacementDuringRun) {
+    console.debug('[BS BioTracker] 追踪进行期间正文被静默替换，沿用本次结果并改按替换后正文重新锚定');
+  }
 
   const result = normalizeTrackerResult(rawResult);
   result.character_check_coverage = buildCharacterCheckCoverage(payload.tracked_females, result.character_checks);
-  applyToolCallsResult(ctx, result);
-  chatState.lastProcessedSignature = attemptedSignature;
-  chatState.lastFailedSignature = '';
+  applyToolCallsResult(ctx, result, attemptedSignature);
+  // Persist the event snapshot before awaiting the optional side inference.
+  const branchKey = getChatKey(ctx);
+  const acceptedSignature = silentReplacementDuringRun ? postCallSignature : attemptedSignature;
+  chatState.lastProcessedSignature = acceptedSignature;
+  if (Object.values(chatState.characters || {}).some((item) => item.profile?.psychology?.pendingSide && item.profile?.base?.isHere !== false)) recordChatStateSnapshot(ctx, chatState, { messageCount: messageIndex + 1, reason: 'tracker_pending_psychology', ...getFloorAnchorFields(getHostChat(ctx)[messageIndex]) });
+  await inferPendingPsychology(ctx, settings, chatState, () => getChatKey(ctx) === branchKey && buildSignature(ctx, messageIndex + 1) === acceptedSignature);
+  if (getChatKey(ctx) !== branchKey || buildSignature(ctx, messageIndex + 1) !== acceptedSignature) return { discarded: true, triggered: true };
+  chatState.lastProcessedSignature = silentReplacementDuringRun ? postCallSignature : attemptedSignature;
   chatState.lastFailedChatSignature = '';
+  settings.hostMutSeqCounter = hostRunState.mutSeq;
   recordChatStateSnapshot(ctx, chatState, {
     messageCount: messageIndex + 1,
     reason: 'tracker',
+    ...getFloorAnchorFields(getHostChat(ctx)[messageIndex]),
     bindToMessage: true,
     replaceMessageCount: reason === 'manual',
   });
   saveSettings(ctx);
   return { discarded: false, triggered: true };
+}
+
+/**
+ * 轮询跳过原因显形：下面几条自动独有的早退原本全程静默，面板停在旧结果上，
+ * 使用者分不清「已追完」「正在等」还是「被某道门卡死」（自动不可用、手动可用
+ * 时只能瞎猜）。状态放在模块级 Map 里按聊天隔离，天然暂态：不进 chatState、
+ * 不持久化、不进快照，更不改写 lastRawResult／lastOperationLogs——成功追踪的
+ * 结果不会被下一轮待命 poll 冲掉。同聊天＋同原因＋同文案＋同来源才去重，
+ * 忙碌来源切换（停止按钮→事件计数）或层数变化都会刷新提示。
+ */
+const pollWaitByChat = new Map();
+export const __pollWaitByChatForTest = pollWaitByChat;
+
+export function getPollWaitStatus(ctx) {
+  return pollWaitByChat.get(String(getChatKey(ctx) || '')) || null;
+}
+
+export function clearPollWaitStatus(ctx) {
+  pollWaitByChat.delete(String(getChatKey(ctx) || ''));
+}
+
+export function recordPollSkip(ctx, deps, reason, message, opts = {}) {
+  const chatKey = String(getChatKey(ctx) || '');
+  const source = String(opts?.source || '');
+  const prev = pollWaitByChat.get(chatKey);
+  if (prev && prev.reason === reason && prev.message === message && prev.source === source) {
+    prev.updatedAt = Date.now();
+    return { skipped: true, reason };
+  }
+  pollWaitByChat.set(chatKey, { reason, message, source, updatedAt: Date.now() });
+  // 按聊天隔离的暂态条目：聊天数有界，换聊天只保留最近若干个
+  while (pollWaitByChat.size > 50) {
+    pollWaitByChat.delete(pollWaitByChat.keys().next().value);
+  }
+  deps.renderStatusPanel(ctx);
+  return { skipped: true, reason };
 }
 
 export async function runTracker(ctx, deps, reason = 'manual') {
@@ -1339,6 +1836,7 @@ export async function runTracker(ctx, deps, reason = 'manual') {
   const chat = getHostChat(ctx);
   const lastMessage = chat[chat.length - 1];
   if (!lastMessage) {
+    clearPollWaitStatus(ctx);
     chatState.lastRawResult = {
       message: '当前对话没有可分析的消息，已跳过追踪。',
       tool_calls: [],
@@ -1350,19 +1848,18 @@ export async function runTracker(ctx, deps, reason = 'manual') {
   }
   if (globalThis[RUN_RUNTIME_KEY]) {
     if (!isTrackerRunStale(settings)) {
-      chatState.lastRawResult = {
-        message: '已有一轮追踪请求正在执行，本次请求未重复发送。',
-        tool_calls: [],
-      };
-      chatState.lastOperationLogs = [];
-      saveSettings(ctx);
-      deps.renderStatusPanel(ctx);
+      // 上一轮的结果仍属于那一轮：单侧心理推演会在锁内等候数分钟，期间每次轮询都会走到这里，
+      // 若清掉 lastOperationLogs，刚结算的避孕结果就进不了下一轮的承接提示
+      if (reason === 'poll') {
+        return recordPollSkip(ctx, deps, 'already_running', '上一轮追踪仍在执行（可能在等单侧心理推演），自动追踪等待中。');
+      }
       return { skipped: true, reason: 'already_running' };
     }
     console.warn('[BS BioTracker] 上一轮追踪已超时未结束，强制释放运行锁');
     globalThis[RUN_RUNTIME_KEY] = null;
   }
   if (registeredTargets.length === 0) {
+    clearPollWaitStatus(ctx);
     chatState.lastRawResult = {
       message: '尚无已注册角色，跳过分析。',
       tool_calls: [],
@@ -1374,6 +1871,7 @@ export async function runTracker(ctx, deps, reason = 'manual') {
     return { skipped: true, reason: 'no_registered_targets' };
   }
   if (reason === 'poll' && getHostKind() === 'luker' && settings.lukerMultiAgentManualOnly !== false) {
+    clearPollWaitStatus(ctx);
     chatState.lastRawResult = {
       message: 'Luker 多智能体安全模式已开启，自动追踪暂停；请在编排完成后手动分析。',
       tool_calls: [],
@@ -1384,40 +1882,68 @@ export async function runTracker(ctx, deps, reason = 'manual') {
     return { skipped: true, reason: 'luker_multi_agent_manual' };
   }
   if (reason === 'poll') {
+    // 主连接没说完话就绝不追踪：从根上消灭「开始吐字时抢发一轮」。
+    // 两路信号分开展示：dataset 是停止按钮的权威状态（无自愈，卡死会一直挡），
+    // depth 是生成事件计数（600 秒自愈）。「卡在正文生成阶段」时面板直接指明是哪一路。
+    const busyDetail = getHostBusyDetail(ctx);
+    if (busyDetail.busy) {
+      return recordPollSkip(
+        ctx,
+        deps,
+        'host_generation_in_flight',
+        busyDetail.source === 'depth'
+          ? `宿主生成事件未闭合（${Number(busyDetail.depth) || 0} 层），自动追踪等待中。`
+          : '宿主仍在生成中（停止按钮未释放），自动追踪等待中。',
+        { source: busyDetail.source || '' },
+      );
+    }
+  }
+  if (reason === 'poll') {
     const agentBarrier = await getHostAgentRunBarrier(ctx, lastMessage);
     if (agentBarrier.state === 'pending') {
-      chatState.lastRawResult = {
-        message: `TauriTavern Agent run ${agentBarrier.runId} 尚未完成，自动追踪将等待最终提交。`,
-        tool_calls: [],
-      };
-      chatState.lastOperationLogs = [];
-      saveSettings(ctx);
-      deps.renderStatusPanel(ctx);
-      return { skipped: true, reason: 'agent_run_pending' };
+      return recordPollSkip(
+        ctx,
+        deps,
+        'agent_run_pending',
+        `TauriTavern Agent run ${agentBarrier.runId} 尚未完成，自动追踪将等待最终提交。`,
+        { source: 'agent' },
+      );
     }
     if (agentBarrier.state === 'aborted') {
-      chatState.lastRawResult = {
-        message: `TauriTavern Agent run ${agentBarrier.runId} 已取消或失败，未自动追踪该提交；可手动分析。`,
-        tool_calls: [],
-      };
-      chatState.lastOperationLogs = [];
-      saveSettings(ctx);
-      deps.renderStatusPanel(ctx);
-      return { skipped: true, reason: 'agent_run_aborted' };
+      return recordPollSkip(
+        ctx,
+        deps,
+        'agent_run_aborted',
+        `TauriTavern Agent run ${agentBarrier.runId} 已取消或失败，未自动追踪该提交；可手动分析。`,
+        { source: 'agent' },
+      );
     }
   }
   if (reason === 'poll' && !isAfterAiMessageSettled(ctx, settings, chatState)) {
-    return { skipped: true, reason: 'message_not_settled' };
+    return recordPollSkip(ctx, deps, 'message_not_settled', '等待 AI 正文稳定后再追踪。');
   }
   if (reason === 'poll' && !hasPendingChatHistory(ctx, chatState)) {
-    return { skipped: true, reason: 'no_pending_history' };
+    return recordPollSkip(ctx, deps, 'no_pending_history', '没有新的可追踪内容，自动追踪待命中。');
   }
   if (reason === 'poll' && shouldWaitForMvuExtraAnalysis(ctx, settings)) {
-    return { skipped: true, reason: 'waiting_mvu_extra_analysis' };
+    return recordPollSkip(ctx, deps, 'waiting_mvu_extra_analysis', '等待 MVU 额外解析结束后再追踪。');
+  }
+  if (reason === 'poll' && tryAdoptSilentTailReplacement(ctx, settings, chatState)) {
+    // 正文替换的无痕改写：静默重锚，不发请求也不弹任何提示；上一轮待命提示作废
+    clearPollWaitStatus(ctx);
+    deps.renderStatusPanel(ctx);
+    return { skipped: true, reason: 'silent_tail_replacement' };
   }
   if (reason === 'poll' && isFailedAutoRetryBlocked(ctx, chatState)) {
-    return { skipped: true, reason: 'failed_message_blocked' };
+    return recordPollSkip(
+      ctx,
+      deps,
+      'failed_message_blocked',
+      '上次自动追踪失败，对话无变化时暂停自动重试；可手动分析或等待新消息。',
+    );
   }
+  // 门控全部通过、真正要干活了：上一轮待命的暂态提示作废，后续面板只展示真实结果
+  clearPollWaitStatus(ctx);
   const runToken = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   globalThis[RUN_RUNTIME_KEY] = runToken;
   markTrackerRunProgress();
@@ -1429,9 +1955,12 @@ export async function runTracker(ctx, deps, reason = 'manual') {
     let processedCount = 0;
     let triggeredCount = 0;
     let discarded = false;
+    // 已经实际送去分析过的楼层边界：之前的讯息只供上下文，不得重复结算；跳过的使用者楼层不算
+    let settledBefore = getLastAnalyzedMessageCount(chatState, nextMessageIndex);
     for (let index = nextMessageIndex; index < chat.length; index += 1) {
       markTrackerRunProgress();
-      const outcome = await processTrackerMessage(ctx, settings, chatState, deps, reason, index);
+      const outcome = await processTrackerMessage(ctx, settings, chatState, deps, reason, index, settledBefore);
+      if (outcome?.triggered) settledBefore = index + 1;
       // 聊天在分析途中被改动：后面的索引已经不可信，交给下一轮重新对账
       if (outcome?.discarded) {
         discarded = true;
@@ -1462,6 +1991,7 @@ export async function runTracker(ctx, deps, reason = 'manual') {
     // 记下失败当下「整段对话」的签名：只要对话没变，自动重试就该被挡住。
     // 失败可能发生在回放的中间楼，只比对尾楼会让轮询无限重发。
     chatState.lastFailedChatSignature = buildSignature(ctx, getHostChat(ctx).length);
+    clearPollWaitStatus(ctx);
     chatState.lastRawResult = {
       error: String(error?.message || error),
       tool_calls: [],
@@ -1469,7 +1999,9 @@ export async function runTracker(ctx, deps, reason = 'manual') {
     chatState.lastOperationLogs = [];
     saveSettings(ctx);
     deps.renderStatusPanel(ctx);
-    globalThis.toastr?.error?.(`追踪失败：${String(error?.message || error)}`, '[BS BioTracker]');
+    // 使用者主动终止不是错误；与失败一样在对话没变化前不自动重试，免得刚按掉又自己发出去
+    if (isApiUserAbortError(error)) globalThis.toastr?.warning?.(String(error?.message || error), '[BS BioTracker]');
+    else globalThis.toastr?.error?.(`追踪失败：${String(error?.message || error)}`, '[BS BioTracker]');
     throw error;
   } finally {
     // 中途放弃（对话被改动）与失败路径都会走到这里，常驻提示不能留在屏幕上
@@ -1484,7 +2016,12 @@ export async function runTracker(ctx, deps, reason = 'manual') {
 
 export async function poll(ctx, deps) {
   const settings = getSettings(ctx);
-  if (!settings.enabled) return;
+  if (!settings.enabled) {
+    return recordPollSkip(ctx, deps, 'disabled', 'BioTracker 已停用（系统页总开关）。');
+  }
+  if (settings.autoTrackEnabled === false) {
+    return recordPollSkip(ctx, deps, 'auto_off', '自动追踪已关闭，按「立即分析当前对话」手动分析。');
+  }
   await runTracker(ctx, deps, 'poll');
 }
 
@@ -1492,6 +2029,11 @@ export function resetPoller(ctx, deps) {
   if (globalThis[POLL_RUNTIME_KEY]) clearInterval(globalThis[POLL_RUNTIME_KEY]);
   // 尽早安装 MVU 生成请求钩子，避免正文后第一时间启动的 MVU 请求漏观测
   installMvuFetchHook();
+  // 变量更新结束事件监听同样必须提前装：忙碌闸门会跳过解析期间的门控评估，
+  // 若等第一次评估才订事件，mag_variable_update_ended 早已错过、只能靠宽限干等
+  installMvuGateListener(ctx);
+  // 宿主 generation/编辑/swipe 事件监听同样只装一次：忙碌闸门与静默替换判定都靠它
+  installHostRunWatchers(ctx);
   const settings = getSettings(ctx);
   globalThis[POLL_RUNTIME_KEY] = setInterval(() => {
     deps.updateClock(settings);

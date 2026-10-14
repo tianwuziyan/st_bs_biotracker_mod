@@ -5,10 +5,11 @@ import test from 'node:test';
 const root = new URL('../', import.meta.url);
 
 test('home grid and manual skill/wardrobe controls stay wired in markup and controller', async () => {
-  const [html, controller, css] = await Promise.all([
+  const [html, controller, css, calculatorUi] = await Promise.all([
     readFile(new URL('settings.html', root), 'utf8'),
     readFile(new URL('index.js', root), 'utf8'),
     readFile(new URL('style.css', root), 'utf8'),
+    readFile(new URL('scripts/calculator_ui.js', root), 'utf8'),
   ]);
   const homeSection = html.match(/<section id="bs-bt-view-home"[\s\S]*?<\/section>/)?.[0] || '';
   const views = [...homeSection.matchAll(/data-nav-view="([^"]+)"/g)].map((match) => match[1]);
@@ -19,14 +20,18 @@ test('home grid and manual skill/wardrobe controls stay wired in markup and cont
   ]);
   for (const id of [
     'bs-bt-skill-catalog-list', 'bs-bt-skill-definition-detail', 'bs-bt-skill-detail-characters',
-    'bs-bt-wardrobe-tabs', 'bs-bt-wardrobe-list', 'bs-bt-wardrobe-characters-page', 'bs-bt-wardrobe-add-page',
+    'bs-bt-skill-detail-name', 'bs-bt-skill-detail-description', 'bs-bt-skill-detail-save',
+    'bs-bt-skill-preset-development', 'bs-bt-skill-preset-behavior',
+    'bs-bt-skill-baseline-prompt', 'bs-bt-skill-baseline-save',
+    'bs-bt-wardrobe-tabs', 'bs-bt-wardrobe-list', 'bs-bt-wardrobe-characters-page', 'bs-bt-wardrobe-add-page', 'bs-bt-wardrobe-add-modal', 'bs-bt-wardrobe-prep-page', 'bs-bt-wardrobe-head', 'bs-bt-wardrobe-tabs-section',
     'bs-bt-register-source', 'bs-bt-register-source-summary',
+    'bs-bt-world-baseline-prompt', 'bs-bt-world-baseline-save',
   ]) {
     assert.match(html, new RegExp(`id="${id}"`));
   }
   const registerTabs = [...html.matchAll(/data-register-tab="([^"]+)"/g)].map((match) => match[1]);
-  assert.deepEqual(registerTabs, ['inference', 'registry', 'wardrobe', 'diary', 'skills']);
-  const registryPage = html.match(/data-register-page="registry"[\s\S]*?data-register-page="wardrobe"/)?.[0] || '';
+  assert.deepEqual(registerTabs, ['inference', 'registry', 'outfit', 'diary', 'skills']);
+  const registryPage = html.match(/data-register-page="registry"[\s\S]*?data-register-page="outfit"/)?.[0] || '';
   assert.match(registryPage, /id="bs-bt-register-custom-notes"/);
   assert.equal((html.match(/id="bs-bt-register-custom-notes"/g) || []).length, 1);
   assert.match(html, /id="bs-bt-register-skill-prompt"/);
@@ -36,10 +41,43 @@ test('home grid and manual skill/wardrobe controls stay wired in markup and cont
   assert.match(html, /id="bs-bt-register-skill-generate"/);
   assert.match(html, /id="bs-bt-register-skill-write"/);
   assert.match(html, /id="bs-bt-register-skill-result"/);
+  assert.deepEqual(
+    [...html.matchAll(/data-encyclopedia-tab="([^"]+)"/g)].map((match) => match[1]),
+    ['race', 'derived', 'world', 'calculator'],
+  );
+  assert.deepEqual(
+    [...html.matchAll(/data-encyclopedia-tab="[^"]+">([^<]+)<\/button>/g)].map((match) => match[1]),
+    ['物种', '衍生', '基准', '计算'],
+  );
+  assert.match(html, /data-encyclopedia-page="world"[\s\S]*?id="bs-bt-world-baseline-prompt"/);
+  assert.match(html, /data-encyclopedia-page="calculator"[\s\S]*?id="bs-bt-calculator-tabs"/);
+  assert.match(html, /<input id="bs-bt-calc-fert-egg-race"/);
+  assert.match(html, /data-race-picker-target="bs-bt-calc-fert-egg-race"/);
+  assert.match(html, /<input id="bs-bt-calc-offspring-sperm-race"/);
+  assert.match(html, /data-race-picker-target="bs-bt-calc-offspring-sperm-race"/);
+  assert.match(html, /id="bs-bt-race-palette-modal"[^>]*role="dialog"[^>]*aria-modal="true"/);
+  assert.match(html, /class="bs-bt-calculator-rule-note">硬规则：/);
+  assert.doesNotMatch(calculatorUi, /lines\.push\('前提：/);
+  assert.match(calculatorUi, /if \(result\.companionEggsMean > 0\)/);
+  assert.match(calculatorUi, /raceAnchor\.dataset\.racePaletteAnchor/);
+  assert.match(calculatorUi, /heading\.append\(order, amountLabel\)/);
+  assert.match(calculatorUi, /controls\.append\(racePicker, input, remove\)/);
+  assert.doesNotMatch(calculatorUi, /整体受精成功后按各精源机会权重/);
+  assert.match(controller, /function bindCalculatorRacePalette\(\)/);
+  assert.match(controller, /paletteModal\.innerHTML = racePaletteState\.isOpen \? renderRacePaletteBody\(\) : ''/);
+  assert.match(controller, /const debugRacePalette = \(\) => '';/);
+  assert.match(css, /\.bs-bt-race-screen-modal \{[\s\S]*?position:\s*absolute;[\s\S]*?inset:\s*0;/);
+  assert.doesNotMatch(html, /id="bs-bt-calc-fert-factor"/);
+  assert.doesNotMatch(html, /id="bs-bt-calc-fert-difficulty"/);
+  assert.doesNotMatch(html, /id="bs-bt-calc-implant-/);
+  assert.doesNotMatch(html, /id="bs-bt-calc-derived-modifier"/);
+  assert.match(html, /id="bs-bt-calc-offspring-stage"/);
+  assert.match(controller, /selectedEncyclopediaSubpage = \['race', 'derived', 'world', 'calculator'\]\.includes\(page\)/);
+  assert.match(controller, /bs-bt-race-open-editor'[\s\S]*?scrollEncyclopediaToTop\(\)[\s\S]*?openRacePhysiologyEditor/);
   assert.doesNotMatch(html, /id="bs-bt-register-skill-load-child"/);
   assert.doesNotMatch(html, /用自然语言描述角色注册时应具备的技能与天赋/);
   assert.doesNotMatch(html, /选择已备装角色后，可直接调整衣物、当前穿着与穿着状态/);
-  assert.deepEqual([...html.matchAll(/data-wardrobe-tab="([^"]+)"/g)].map((match) => match[1]), ['characters', 'add']);
+  assert.deepEqual([...html.matchAll(/data-wardrobe-tab="([^"]+)"/g)].map((match) => match[1]), ['characters', 'prep']);
   assert.match(controller, /skillPrompt/);
   assert.match(controller.slice(0, 500), /applyInitialSkillTalentConfig/);
   assert.doesNotMatch(controller, />查看<\/button>/);
@@ -56,13 +94,54 @@ test('home grid and manual skill/wardrobe controls stay wired in markup and cont
   assert.match(css, /\.bs-bt-status-icons::after/);
   assert.match(css, /\.bs-bt-status-icons:focus-visible::after/);
   assert.match(controller, /data-skill-definition-delete/);
+  assert.match(controller, /importSkillPresetGroup\(chatState\.skillCatalog, chatState\.nextSkillId, groupKey\)/);
+  assert.match(controller, /bs-bt-skill-preset-development/);
+  assert.match(controller, /bs-bt-skill-preset-behavior/);
+  assert.match(controller, /function saveSkillBaselinePrompt\(ctx\)/);
+  assert.match(controller, /updateSkillDefinition\(chatState\.skillCatalog, selectedSkillDefinitionId/);
+  assert.doesNotMatch(controller, /kinkExperiences|kinkCatalog|bsAddKinkExperience/);
   assert.match(controller, /class="bs-bt-wardrobe-row-delete"/);
-  assert.match(controller, /id="bs-bt-wardrobe-item-character"/);
-  assert.match(controller, /id="bs-bt-wardrobe-item-layer-field"[\s\S]*?data-wardrobe-type-field="accessory" hidden/);
+  assert.match(controller, /data-wardrobe-item-edit/);
+  assert.match(controller, /id="bs-bt-wardrobe-edit-note"/);
+  assert.match(controller, /manual_wardrobe_item_update/);
+  assert.doesNotMatch(controller, /id="bs-bt-wardrobe-item-character"/, '新增衣物归属于正在看的角色，不再另外选');
+  assert.match(controller, /data-wardrobe-add-slot="\$\{escapeHtml\(slot\)\}"/, '每个分类标题都有加号');
+  assert.match(html, /id="bs-bt-wardrobe-add-modal"[\s\S]*?id="bs-bt-wardrobe-add-page"/, '新增衣物在弹出视窗里');
+  assert.match(controller, /id="bs-bt-wardrobe-item-effects-field"[\s\S]*?data-wardrobe-type-field="accessory" hidden/);
   assert.match(controller, /id="bs-bt-wardrobe-item-parts-field"[\s\S]*?data-wardrobe-type-field="main"/);
+  assert.match(controller, /<option value="unknown"/);
+  assert.doesNotMatch(controller, /bs-bt-wardrobe-item-\$\{key\}[\s\S]*?type="number"/);
   assert.match(controller, /function updateWardrobeAddTypeFields\(\)/);
   assert.match(controller, /function renderFetalTalentDebugEditor\(/);
   assert.match(controller, /function renderTrackDebug\(viewModel, fetalTalentHtml = ''\)/);
+  assert.match(controller, /function renderSpermShareSection\(sperms, \{ badge = '', badgeClass = '', conceptionChance = null \} = \{\}\)/);
+  assert.match(controller, /renderSpermShareSection\(data\.sperms, \{/);
+  assert.doesNotMatch(controller, /renderCardCarouselSection\(\s*'精液来源'/, '精液来源不应再走卡片轮播');
+  assert.match(controller, /if \(items\.length === 0\) return '';/, '单一精液来源也必须显示占比环');
+  assert.match(controller, /bs-bt-sperm-share__race/, '圆饼图图例应保留来源种族');
+  assert.doesNotMatch(controller, /bs-bt-sperm-share__pct/, '圆饼图已经表达占比，图例不应重复显示百分比');
+  assert.match(controller, /calculateFertilizationPreview/, '精卵同时存在时应复用真实受精公式');
+  const stageImports = controller.match(/import \{([^}]+)\} from '\.\/scripts\/stage_config\.js';/)?.[1] || '';
+  assert.match(stageImports, /\bMENSTRUAL_STAGES\b/, '追踪页受孕率依赖的月经阶段目录必须显式导入');
+  assert.match(controller, /conceptionChance/, '精液来源区应显示所有精源合计受孕率');
+  assert.match(controller, /is-conceived/, '已有受精卵时危险期徽章应进入特效状态');
+  assert.match(controller, /hasPendingImplantation/, '普通受精、异期受孕与孕中孕的待着床胚胎都应触发状态徽章特效');
+  assert.match(controller, /bs-bt-sperm-share__chance/, '24 小时受孕率应有独立的圆饼图下方样式');
+  assert.match(controller, /bs-bt-sperm-share__visual[\s\S]*\$\{chanceHtml\}[\s\S]*bs-bt-sperm-share__legend/, '受孕率应放在圆饼视觉栏内而非标题或图例');
+  assert.match(controller, /id="bs-bt-debug-conception-mode"/);
+  for (const mode of ['normal', 'surrogacy', 'womb_return', 'superfetation', 'nested']) {
+    assert.match(controller, new RegExp(`${mode}: \\{ label:`));
+  }
+  assert.match(controller, /id="bs-bt-debug-provider"/);
+  assert.match(controller, /id="bs-bt-debug-returner"/);
+  assert.match(controller, /id="bs-bt-debug-host-fetus"/);
+  assert.match(controller, /id="bs-bt-debug-force-identical"/);
+  assert.match(controller, /id="bs-bt-debug-force-chimera"/);
+  assert.match(controller, /id="bs-bt-debug-secondary-provider"/);
+  assert.match(controller, /id="bs-bt-debug-secondary-provider-race"/);
+  assert.match(controller, /胎内回归的正式机制没有同卵分裂，此项不可用/);
+  assert.match(controller, /先嵌合再分裂/);
+  assert.match(controller, /function bindDebugPregnancyDraftControls\(/);
   assert.match(controller, /胎儿自主活动调试[\s\S]*?\$\{fetalTalentHtml\}[\s\S]*?妊娠变速效果/);
   const pregnancySection = controller.match(/function renderTrackPregnancy\(viewModel\) \{[\s\S]*?\n\}/)?.[0] || '';
   assert.match(pregnancySection, /'本周期受精竞争'/);
@@ -76,16 +155,22 @@ test('home grid and manual skill/wardrobe controls stay wired in markup and cont
   assert.match(controller, /manual_fetal_talent_delete/);
   assert.match(controller, /function renderRegisterChildSourceOptions\(/);
   assert.match(controller, /function syncRegisterChildSourceFields\(/);
+  assert.match(controller, /const host = document\.getElementById\(MODAL_ID\) \|\| document\.body/);
+  assert.match(controller, /function centerLineageCard\(root\)/);
+  assert.doesNotMatch(controller, /querySelector\('\.bs-bt-lineage__card\.is-center'\)\?\.scrollIntoView/);
+  assert.match(css, /\.bs-bt-lineage \{[\s\S]*?height:\s*100dvh/);
+  assert.match(css, /\.bs-bt-lineage \{[\s\S]*?pointer-events:\s*auto/);
   assert.match(controller, /sourceChild/);
-  assert.doesNotMatch(controller, /data-wardrobe-item-edit/);
   assert.doesNotMatch(controller, /data-wardrobe-item-new/);
   assert.doesNotMatch(html, /id="bs-bt-skill-definition-delete-select"/);
   assert.doesNotMatch(html, /id="bs-bt-skill-definition-delete"/);
   assert.match(css, /#bs-bt-skill-catalog-overview\[hidden\][\s\S]*?display:\s*none/);
-  assert.match(css, /#bs-bt-wardrobe-add-page\[hidden\][\s\S]*?display:\s*none/);
+  assert.match(css, /\.bs-bt-race-editor-modal\[hidden\][\s\S]*?display:\s*none/);
+  assert.doesNotMatch(controller, /data-wardrobe-initialize/);
+  assert.doesNotMatch(controller, /initializeEmptyWardrobe/);
   for (const action of [
     'data-skill-definition-open',
-    'data-wardrobe-initialize', 'data-wardrobe-item-save', 'data-wardrobe-item-delete', 'data-wardrobe-outfit-apply',
+    'data-wardrobe-item-save', 'data-wardrobe-item-delete', 'data-wardrobe-outfit-apply',
   ]) {
     assert.match(controller, new RegExp(action));
   }

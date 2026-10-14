@@ -1,4 +1,4 @@
-﻿// MVU 额外模型解析兼容门控测试：验证追踪请求在 MVU 变量更新结束前会被推迟。
+// MVU 额外模型解析兼容门控测试：验证追踪请求在 MVU 变量更新结束前会被推迟。
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
@@ -6,6 +6,7 @@ import {
   __mvuGateStateForTest,
   getMainflowContextSnapshot,
   installMvuFetchHook,
+  installMvuGateListener,
   isMvuExtraAnalysisEnabled,
   isMvuExtraAnalysisRequest,
   shouldWaitForMvuExtraAnalysis,
@@ -27,7 +28,7 @@ function makeCtx(overrides = {}) {
 }
 
 function makeSettings(overrides = {}) {
-  return { mvuExtraAnalysisCompat: true, ...overrides };
+  return { ...overrides };
 }
 
 function makeMvuSettings(overrides = {}) {
@@ -45,7 +46,6 @@ function resetGate() {
   __mvuGateStateForTest.pendingKey = '';
   __mvuGateStateForTest.pendingContentKey = '';
   __mvuGateStateForTest.pendingSince = 0;
-  __mvuGateStateForTest.announcedChatKey = '';
   // fetchHooked/eventInstalled 不重置：钩子只装一次，避免嵌套包装
   __mvuGateStateForTest.generateInFlight = 0;
   __mvuGateStateForTest.lastGenerateStartedAt = 0;
@@ -75,13 +75,15 @@ test('MVU 更新方式为随AI输出时不等待', () => {
   assert.equal(shouldWaitForMvuExtraAnalysis(ctx, makeSettings()), false);
 });
 
-test('关闭兼容开关后即使 MVU 配置了额外解析也不等待', () => {
+test('兼容开关已移除：即使存档里残留关闭值，门控依然恒等待', () => {
   resetGate();
+  setDuring(false);
   const ctx = makeCtx({
     extensionSettings: { mvu_settings: makeMvuSettings() },
   });
-  assert.equal(isMvuExtraAnalysisEnabled(ctx, makeSettings({ mvuExtraAnalysisCompat: false })), false);
-  assert.equal(shouldWaitForMvuExtraAnalysis(ctx, makeSettings({ mvuExtraAnalysisCompat: false })), false);
+  // 旧存档的 mvuExtraAnalysisCompat: false 已不再被读取，恒开启
+  assert.equal(isMvuExtraAnalysisEnabled(ctx, makeSettings({ mvuExtraAnalysisCompat: false })), true);
+  assert.equal(shouldWaitForMvuExtraAnalysis(ctx, makeSettings({ mvuExtraAnalysisCompat: false })), true);
 });
 
 test('额外模型解析未开启自动请求时视为不等待', () => {
@@ -201,7 +203,7 @@ test('宽限期超时且 MVU 从未解析时放行', () => {
   assert.equal(shouldWaitForMvuExtraAnalysis(ctx, settings), false);
 });
 
-test('尾楼是用户消息（after_user 时机）时不等待', () => {
+test('尾楼是用户消息（例如手动分析）时不等待', () => {
   resetGate();
   setDuring(true);
   const ctx = makeCtx({
@@ -262,17 +264,74 @@ test('额外模型解析但自动请求关闭 → 门控直接放行', () => {
   assert.equal(shouldWaitForMvuExtraAnalysis(ctx, makeSettings()), false);
 });
 
-test('TT 场景：读不到设置、无 Mvu，但确认是 MVU 额外解析请求在飞行 → 等待', () => {
+test('完全没有 Mvu 全局时，特征请求在飞也不等待（第三方插件误命中不再空等）', () => {
   resetGate();
   const ctx = makeCtx(); // 无 mvu_settings、无 Mvu 全局
   const settings = makeSettings();
   // 首次评估：未看到信号
   assert.equal(shouldWaitForMvuExtraAnalysis(ctx, settings), false);
-  // MVU 的额外解析请求开始飞行（fetch 钩子观测到）
+  // 某个第三方插件（数据库正文替换/填表转发聊天正文）的请求命中 MVU 特征、在飞行：
+  // 没有激活的 MVU 实例就不会有人解析变量（MVU 只在优先实例上挂 window.parent.Mvu），
+  // 此时等待纯属空转——这正是无 MVU 用户被拖住的历史路径
   __mvuGateStateForTest.generateInFlight = 1;
   __mvuGateStateForTest.lastGenerateStartedAt = Date.now();
   __mvuGateStateForTest.sawGenerateThisRound = true;
-  assert.equal(shouldWaitForMvuExtraAnalysis(ctx, settings), true);
+  assert.equal(shouldWaitForMvuExtraAnalysis(ctx, settings), false);
+});
+
+test('回归：停用 MVU 后 mvu_settings 残留、Mvu 全局不在场 → 不等待', () => {
+  resetGate();
+  // MVU 把设置写在 SillyTavern.extensionSettings.mvu_settings（全局、跨卡共享、
+  // 无人清理），所以换到没有 MVU 的卡或停用 MVU 后设置仍在；而 Mvu 全局会随
+  // 优先实例缺席而不在场。只凭设置就等待，会让这类用户每轮白等宽限期。
+  const ctx = makeCtx({ extensionSettings: { mvu_settings: makeMvuSettings() } });
+  const settings = makeSettings();
+  assert.equal(globalThis.Mvu, undefined, '前提：没有 Mvu 全局');
+  assert.equal(shouldWaitForMvuExtraAnalysis(ctx, settings), false, '设置残留不应单独构成等待理由');
+  assert.equal(
+    __mvuGateStateForTest.everSawMvuSignal,
+    false,
+    '残留设置不得把设备标记为「见过 MVU 信号」（否则之后每轮都白等宽限）',
+  );
+  // 即便有特征请求在飞也照样放行：没有 MVU 实例，没人会解析
+  __mvuGateStateForTest.generateInFlight = 1;
+  assert.equal(shouldWaitForMvuExtraAnalysis(ctx, settings), false);
+});
+
+test('旧版 MVU：全局在场但没有 isDuringExtraAnalysis → 仍按请求特征兜底等待', () => {
+  resetGate();
+  // 旧版 MVU 只暴露 Mvu 全局、没有权威的解析状态方法
+  globalThis.Mvu = { getMvuData: () => ({}) };
+  const ctx = makeCtx({ extensionSettings: { mvu_settings: makeMvuSettings() } });
+  const settings = makeSettings();
+  __mvuGateStateForTest.generateInFlight = 1;
+  __mvuGateStateForTest.lastGenerateStartedAt = Date.now();
+  assert.equal(shouldWaitForMvuExtraAnalysis(ctx, settings), true, '旧版兜底路径必须保留');
+  __mvuGateStateForTest.generateInFlight = 0;
+  __mvuGateStateForTest.pendingSince = Date.now() - 5000;
+  assert.equal(shouldWaitForMvuExtraAnalysis(ctx, settings), false);
+});
+
+test('在场判定要认 window.parent.Mvu（MVU 跑在酒馆助手 iframe 时挂在父窗口）', () => {
+  resetGate();
+  // MVU 作为酒馆助手脚本运行在 iframe，把全局挂到 window.parent；本插件若也在
+  // iframe 之外的上下文里取，就必须认这条分支——门控现在以「全局在场」为门槛
+  globalThis.parent = { Mvu: { isDuringExtraAnalysis: () => true } };
+  try {
+    const ctx = makeCtx();
+    assert.equal(shouldWaitForMvuExtraAnalysis(ctx, makeSettings()), true, 'parent 上的 Mvu 应被认作在场');
+  } finally {
+    delete globalThis.parent;
+  }
+});
+
+test('Mvu 全局不是对象时不算在场（不放行出兜底等待）', () => {
+  resetGate();
+  // getMvuApi 只认对象；万一 MVU 暴露成函数或原始值，不能当作「有 MVU」
+  globalThis.Mvu = () => {};
+  const ctx = makeCtx({ extensionSettings: { mvu_settings: makeMvuSettings() } });
+  assert.equal(shouldWaitForMvuExtraAnalysis(ctx, makeSettings()), false);
+  assert.equal(__mvuGateStateForTest.everSawMvuSignal, false);
 });
 
 test('fetch 钩子只认 MVU 特征请求：普通 ST 主线生成不触发（误报回归）', () => {
@@ -376,6 +435,8 @@ test('端到端：MVU 额外解析请求经过真实 fetch 钩子触发等待', 
 
 test('生成请求结束后放行', () => {
   resetGate();
+  // 走旧版兜底路径：全局在场（才有解析可能）但没有权威状态方法
+  globalThis.Mvu = { getMvuData: () => ({}) };
   const ctx = makeCtx();
   const settings = makeSettings();
   // 请求在飞行 → 等待
@@ -384,11 +445,14 @@ test('生成请求结束后放行', () => {
   assert.equal(shouldWaitForMvuExtraAnalysis(ctx, settings), true);
   // 请求完成 → 放行（MVU 变量已更新）
   __mvuGateStateForTest.generateInFlight = 0;
+  __mvuGateStateForTest.pendingSince = Date.now() - 5000;
   assert.equal(shouldWaitForMvuExtraAnalysis(ctx, settings), false);
 });
 
 test('见过 MVU 信号后，无信号轮次走宽限期等待', () => {
   resetGate();
+  // MVU 在场（没有权威状态方法，走旧版兜底那条）
+  globalThis.Mvu = { getMvuData: () => ({}) };
   const ctx = makeCtx();
   const settings = makeSettings();
   // 之前某轮见过生成请求（everSaw 为 true）
@@ -398,6 +462,17 @@ test('见过 MVU 信号后，无信号轮次走宽限期等待', () => {
   // 超过宽限期仍未出现信号 → 放行
   __mvuGateStateForTest.pendingSince = Date.now() - 5000;
   assert.equal(shouldWaitForMvuExtraAnalysis(ctx, settings), false);
+});
+
+test('MVU 不在场时粘性标记被清除：停用/换卡后不再每轮白等宽限', () => {
+  resetGate();
+  const ctx = makeCtx({ extensionSettings: { mvu_settings: makeMvuSettings() } });
+  const settings = makeSettings();
+  // 模拟本页早先见过 MVU 信号、之后 MVU 消失（停用脚本或换到无 MVU 的卡）
+  __mvuGateStateForTest.everSawMvuSignal = true;
+  assert.equal(globalThis.Mvu, undefined, '前提：此刻没有 Mvu 全局');
+  assert.equal(shouldWaitForMvuExtraAnalysis(ctx, settings), false);
+  assert.equal(__mvuGateStateForTest.everSawMvuSignal, false, '不在场时应抹掉记忆，下一轮才不会再白等');
 });
 
 test('mainflow 快照绑定当前聊天：跨聊天/无绑定一律拒绝', () => {
@@ -435,4 +510,98 @@ test('mainflow 状态 JSON 转义闭合标签与换行（安全审查 P1 注入�
   // 包裹标签本身仍在（转义只作用于 JSON 内容，不破坏结构）
   assert.ok(prompt.includes('<bs_biotracker>'), '起始包裹标签应保留');
   assert.ok(prompt.trimEnd().endsWith('</bs_biotracker>'), '结束包裹标签应保留在末尾');
+});
+
+// ---- TT 实测两分钟延迟的回归点 ----
+// 数据库正文替换/填表的请求体嵌着含 <UpdateVariable>、json_patch 字样的正文，
+// 会被 fetch 特征误命中。新版 MVU 有 isDuringExtraAnalysis 全局权威时，门控
+// 不得再采信特征计数，否则追踪会串行等完数据库整条后处理管线。
+test('MVU 全局可得时不采信 fetch 特征在飞（正文替换/填表误命中不连锁）', () => {
+  resetGate();
+  setDuring(false); // 全局权威：本轮 MVU 解析已经结束
+  const ctx = makeCtx({
+    extensionSettings: { mvu_settings: makeMvuSettings() },
+  });
+  const settings = makeSettings();
+  __mvuGateStateForTest.generateInFlight = 5; // 数据库请求被特征误命中
+  // 首次评估进入宽限期等待（此时还没有任何结束信号）
+  assert.equal(shouldWaitForMvuExtraAnalysis(ctx, settings), true);
+  __mvuGateStateForTest.pendingSince = Date.now() - MVU_EXTRA_WAIT_GRACE_MS - 1000;
+  assert.equal(
+    shouldWaitForMvuExtraAnalysis(ctx, settings),
+    false,
+    '全局说不忙就放行，不能被误命中的特征计数拖到 120 秒上限',
+  );
+});
+
+test('替换改写不重启宽限：等待起点保持，宽限到期即放行', () => {
+  resetGate();
+  setDuring(false);
+  const ctx = makeCtx({
+    extensionSettings: { mvu_settings: makeMvuSettings() },
+  });
+  const settings = makeSettings();
+  assert.equal(shouldWaitForMvuExtraAnalysis(ctx, settings), true);
+  const pendingSince = __mvuGateStateForTest.pendingSince;
+  // 正文替换落库：同楼层改写 + 戳记晚于等待起点
+  const tail = ctx.chat[ctx.chat.length - 1];
+  tail.mes = '变量渲染后的正文';
+  // 戳记必须严格晚于等待起点；直接取 Date.now() 可能与起点落在同一毫秒而偶发失败
+  tail.extra = { _acu_last_optimized_at: pendingSince + 1 };
+  assert.equal(shouldWaitForMvuExtraAnalysis(ctx, settings), true);
+  assert.equal(__mvuGateStateForTest.pendingSince, pendingSince, '替换落库不得重排等待起点');
+  // 宽限到期即放行（旧逻辑会被替换续杯、继续等待）
+  __mvuGateStateForTest.pendingSince = Date.now() - MVU_EXTRA_WAIT_GRACE_MS - 1000;
+  assert.equal(shouldWaitForMvuExtraAnalysis(ctx, settings), false);
+});
+
+test('结束事件新鲜但替换先落地：有晚于事件的替换戳即放行，不等宽限', () => {
+  resetGate();
+  setDuring(false);
+  const ctx = makeCtx({
+    extensionSettings: { mvu_settings: makeMvuSettings() },
+  });
+  const settings = makeSettings();
+  assert.equal(shouldWaitForMvuExtraAnalysis(ctx, settings), true);
+  // 结束事件记录的是替换前的指纹
+  const roundKey = `${ctx.chatId}:${ctx.chat.length}:assistant:${ctx.chat[ctx.chat.length - 1].id}`;
+  __mvuGateStateForTest.lastEndedKey = roundKey;
+  __mvuGateStateForTest.lastEndedContentKey = buildSignature(ctx, ctx.chat.length);
+  __mvuGateStateForTest.lastEndedAt = Date.now() - 50;
+  // 替换在事件之后落库
+  const tail = ctx.chat[ctx.chat.length - 1];
+  tail.mes = '替换后正文';
+  tail.extra = { _acu_last_optimized_at: Date.now() };
+  assert.equal(
+    shouldWaitForMvuExtraAnalysis(ctx, settings),
+    false,
+    'MVU 产物已落定（戳晚于结束事件），应立即在最终正文上放行',
+  );
+});
+
+test('监听提前安装时，结束事件一到即记录、门控立刻放行（不等宽限期）', () => {
+  resetGate();
+  setDuring(false);
+  // 重置安装标志，用独立 eventSource 验证「先订监听、后发事件」的时序
+  __mvuGateStateForTest.eventInstalled = false;
+  const handlers = new Map();
+  const eventSource = {
+    on(name, fn) { handlers.set(name, [fn]); },
+    emit(name) { (handlers.get(name) || []).forEach((fn) => fn()); },
+  };
+  const ctx = makeCtx({
+    eventSource,
+    extensionSettings: { mvu_settings: makeMvuSettings() },
+  });
+  const settings = makeSettings();
+  installMvuGateListener(ctx); // 相当于 resetPoller 的提前安装时机
+  assert.equal(handlers.size, 1, '事件名解析自 Mvu.events 或字面量，应挂上监听');
+  // 宿主/DB 在忙碌阶段不会评估门控；解析结束事件先于任何评估发生
+  eventSource.emit('mag_variable_update_ended');
+  assert.equal(
+    shouldWaitForMvuExtraAnalysis(ctx, settings),
+    false,
+    '错过的结束事件已被记录，评估当轮即放行',
+  );
+  __mvuGateStateForTest.eventInstalled = false;
 });

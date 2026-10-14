@@ -881,6 +881,33 @@
   justify-self: end;
 }
 
+#bs-biotracker-settings .bs-bt-header-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-self: end;
+  gap: 6px;
+}
+
+#bs-biotracker-settings .bs-bt-help-button {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+#bs-biotracker-settings .bs-bt-help-button:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+
 #bs-biotracker-settings .bs-bt-screen-content {
   position: relative;
   flex: 1 1 auto;
@@ -906,6 +933,49 @@
 
 #bs-biotracker-settings .bs-bt-view.is-active {
   display: block;
+}
+
+#bs-biotracker-settings .bs-bt-help h2 {
+  margin: 0 0 10px;
+  font-size: 1.15em;
+}
+
+#bs-biotracker-settings .bs-bt-help p {
+  margin: 8px 0;
+}
+
+#bs-biotracker-settings .bs-bt-help a {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+#bs-biotracker-settings .bs-bt-help a:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+
+#bs-biotracker-settings .bs-bt-help details {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px solid currentColor;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+#bs-biotracker-settings .bs-bt-help summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+#bs-biotracker-settings .bs-bt-help ol,
+#bs-biotracker-settings .bs-bt-help ul {
+  margin: 8px 0 0;
+  padding-inline-start: 1.4em;
+}
+
+#bs-biotracker-settings .bs-bt-help li + li {
+  margin-top: 6px;
 }
 
 #bs-biotracker-settings .bs-bt-menu-grid {
@@ -975,12 +1045,20 @@
   color: var(--bsbt-lcd-bg);
 }
 
+/* 单栏必须是 minmax(0, 1fr)：隐式的 auto 栏会被最长的不可断内容（例如端点预览里的长网址）撑宽，
+   整栏输入框跟着变宽，再被 overflow-x: hidden 切掉右缘。不支援 overflow-wrap: anywhere 的浏览器最容易出现 */
 #bs-biotracker-settings .bs-bt-panel {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
   width: 100%;
   min-width: 0;
   overflow-x: hidden;
+}
+
+#bs-biotracker-settings #bs-bt-api-endpoint-preview-code {
+  overflow-wrap: anywhere;
+  word-break: break-all;
 }
 
 #bs-biotracker-settings .bs-bt-section-title,
@@ -1098,6 +1176,12 @@
   resize: vertical;
 }
 
+#bs-biotracker-settings .bs-bt-textarea.bs-bt-compact-textarea {
+  min-height: 56px;
+  max-height: 120px;
+  resize: vertical;
+}
+
 #bs-biotracker-settings .bs-bt-status-box {
   white-space: pre-wrap;
   min-height: 160px;
@@ -1139,6 +1223,12 @@
 }
 
 #bs-biotracker-settings .bs-bt-register-page[hidden] {
+  display: none;
+}
+
+/* 系统页关掉的扩充系统：入口磁贴与注册分页整个拿掉 */
+#bs-biotracker-settings .bs-bt-home-tile[hidden],
+#bs-biotracker-settings .bs-bt-track-tab[hidden] {
   display: none;
 }
 
@@ -1671,7 +1761,7 @@
 }
 
 #bs-biotracker-settings #bs-bt-encyclopedia-tabs {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 #bs-biotracker-settings .bs-bt-encyclopedia-page {
@@ -1683,8 +1773,100 @@
   display: none;
 }
 
-#bs-biotracker-settings .bs-bt-full-state-tabs {
+#bs-biotracker-settings .bs-bt-calculator-tabs {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+#bs-biotracker-settings .bs-bt-calculator-panel {
+  display: grid;
+  gap: 10px;
+}
+
+#bs-biotracker-settings .bs-bt-calculator-panel[hidden] {
+  display: none;
+}
+
+#bs-biotracker-settings .bs-bt-calculator-card {
+  display: grid;
+  gap: 9px;
+}
+
+#bs-biotracker-settings .bs-bt-calculator-grid {
+  display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+#bs-biotracker-settings .bs-bt-calculator-grid label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+#bs-biotracker-settings .bs-bt-calculator-grid label > span,
+#bs-biotracker-settings .bs-bt-calculator-sperm-order {
+  font-size: 0.84em;
+  font-weight: 700;
+}
+
+#bs-biotracker-settings .bs-bt-calculator-sperm-list {
+  display: grid;
+  gap: 6px;
+}
+
+#bs-biotracker-settings .bs-bt-calculator-sperm-row {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+#bs-biotracker-settings .bs-bt-calculator-sperm-heading,
+#bs-biotracker-settings .bs-bt-calculator-sperm-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(72px, 0.45fr) auto;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+}
+
+#bs-biotracker-settings .bs-bt-calculator-sperm-order {
+  grid-column: 1;
+}
+
+#bs-biotracker-settings .bs-bt-calculator-sperm-amount-label {
+  grid-column: 2;
+  font-size: 0.84em;
+  font-weight: 700;
+}
+
+#bs-biotracker-settings .bs-bt-calculator-remove {
+  min-width: 0;
+  padding-inline: 9px;
+}
+
+#bs-biotracker-settings .bs-bt-calculator-rule-note {
+  display: block;
+  padding: 7px 9px;
+  border-left: 3px solid currentColor;
+  background: rgba(127, 127, 127, 0.08);
+  line-height: 1.45;
+  opacity: 0.82;
+}
+
+@media (max-width: 540px) {
+  #bs-biotracker-settings .bs-bt-calculator-tabs,
+  #bs-biotracker-settings .bs-bt-calculator-grid {
+    grid-template-columns: 1fr;
+  }
+
+  #bs-biotracker-settings .bs-bt-calculator-sperm-heading,
+  #bs-biotracker-settings .bs-bt-calculator-sperm-controls {
+    grid-template-columns: minmax(0, 1fr) minmax(62px, 0.45fr) auto;
+  }
+}
+
+#bs-biotracker-settings .bs-bt-full-state-tabs {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 #bs-biotracker-settings .bs-bt-track-tabs::-webkit-scrollbar,
@@ -1813,6 +1995,50 @@
 
 #bs-biotracker-settings .bs-bt-track-debug-form[disabled] {
   opacity: 0.55;
+}
+
+#bs-biotracker-settings .bs-bt-skill-preset-grid {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+#bs-biotracker-settings .bs-bt-skill-card__description {
+  margin: 6px 0 10px;
+  font-size: 0.88em;
+  line-height: 1.45;
+  opacity: 0.82;
+}
+
+#bs-biotracker-settings .bs-bt-debug-mode-note {
+  display: grid;
+  gap: 3px;
+  padding: 9px 10px;
+  border: 1px solid var(--bsbt-border-color);
+  border-radius: 8px;
+  background: rgba(127, 127, 127, 0.08);
+}
+
+#bs-biotracker-settings .bs-bt-debug-mode-note span,
+#bs-biotracker-settings .bs-bt-debug-identical-option small {
+  display: block;
+  opacity: 0.78;
+  line-height: 1.45;
+}
+
+#bs-biotracker-settings .bs-bt-debug-identical-option {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 9px;
+  align-items: start;
+  padding: 9px 10px;
+  border: 1px solid var(--bsbt-border-color);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+#bs-biotracker-settings .bs-bt-debug-identical-option input {
+  margin-top: 3px;
 }
 
 #bs-biotracker-settings .bs-bt-track-debug-field {
@@ -1948,6 +2174,58 @@
   gap: 6px;
 }
 
+#bs-biotracker-settings .bs-bt-race-share-list {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+#bs-biotracker-settings .bs-bt-race-share-row {
+  padding: 8px;
+  border: 1px solid var(--bsbt-border-color);
+  border-radius: 8px;
+  min-width: 0;
+}
+
+#bs-biotracker-settings .bs-bt-race-share-head,
+#bs-biotracker-settings .bs-bt-race-share-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  overflow-wrap: anywhere;
+}
+
+#bs-biotracker-settings .bs-bt-race-share-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 96px;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+#bs-biotracker-settings [data-race-share-status] {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+#bs-biotracker-settings .bs-bt-race-share-controls input[type='range'] {
+  width: 100%;
+  min-width: 0;
+  accent-color: var(--bsbt-lcd-text);
+}
+
+#bs-biotracker-settings .bs-bt-race-share-controls label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+#bs-biotracker-settings .bs-bt-race-share-controls input[type='number'] {
+  width: 72px;
+  min-width: 0;
+}
+
 #bs-biotracker-settings .bs-bt-race-tag {
   display: inline-flex;
   align-items: center;
@@ -2036,6 +2314,12 @@
 #bs-biotracker-settings .bs-bt-race-editor-field > span:first-child {
   font-size: 0.84em;
   opacity: 0.82;
+}
+
+#bs-biotracker-settings .bs-bt-race-editor-hint {
+  font-size: 0.76em;
+  line-height: 1.45;
+  opacity: 0.72;
 }
 
 #bs-biotracker-settings .bs-bt-race-editor-badge {
@@ -2151,6 +2435,7 @@
 #bs-biotracker-settings .bs-bt-track-title-left,
 #bs-biotracker-settings .bs-bt-track-section-title:not(.bs-bt-track-section-title--split) {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   min-width: 0;
@@ -2284,6 +2569,8 @@
 
 #bs-biotracker-settings .bs-bt-track-progress-head {
   display: flex;
+  flex-wrap: wrap;
+  overflow-wrap: anywhere;
   justify-content: space-between;
   gap: 8px;
   font-size: 0.9em;
@@ -2315,8 +2602,10 @@
   gap: 8px;
 }
 
-#bs-biotracker-settings .bs-bt-track-metabolism-grid.is-derived {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+/* 衍生：四项普通需求分列左右，flux 居中占上下两排 */
+#bs-biotracker-settings .bs-bt-track-metabolism-grid.is-derived .bs-bt-need-tile--flux {
+  grid-column: 2;
+  grid-row: 1 / span 2;
 }
 
 #bs-biotracker-settings .bs-bt-need-tile {
@@ -2533,6 +2822,120 @@
 
 #bs-biotracker-settings .bs-bt-track-description-empty {
   opacity: 0.75;
+}
+
+/* A bounded, native scroller keeps long cognition histories on a station timeline. */
+#bs-biotracker-settings .bs-bt-cognition-timeline {
+  max-height: min(340px, max(120px, calc(var(--bsbt-device-height) - 350px)), 40vh);
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--bsbt-lcd-text) transparent;
+  scrollbar-gutter: stable;
+  padding: 2px 4px 2px 2px;
+}
+
+#bs-biotracker-settings .bs-bt-cognition-timeline:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+#bs-biotracker-settings .bs-bt-cognition-timeline::-webkit-scrollbar {
+  width: 6px;
+}
+
+#bs-biotracker-settings .bs-bt-cognition-timeline::-webkit-scrollbar-thumb {
+  background: var(--bsbt-lcd-text);
+  border-radius: 3px;
+}
+
+#bs-biotracker-settings .bs-bt-cognition-timeline-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+#bs-biotracker-settings .bs-bt-cognition-timeline-stop {
+  position: relative;
+  padding: 0 0 10px 24px;
+  min-width: 0;
+}
+
+#bs-biotracker-settings .bs-bt-cognition-timeline-stop:last-child {
+  padding-bottom: 0;
+}
+
+#bs-biotracker-settings .bs-bt-cognition-timeline-stop::before {
+  content: '';
+  position: absolute;
+  left: 6px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: currentColor;
+  opacity: 0.45;
+}
+
+#bs-biotracker-settings .bs-bt-cognition-timeline-stop:first-child::before {
+  top: 18px;
+}
+
+#bs-biotracker-settings .bs-bt-cognition-timeline-stop:last-child::before {
+  bottom: auto;
+  height: 18px;
+}
+
+#bs-biotracker-settings .bs-bt-cognition-timeline-stop:only-child::before {
+  display: none;
+}
+
+#bs-biotracker-settings .bs-bt-cognition-timeline-stop::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 11px;
+  width: 10px;
+  height: 10px;
+  border: 2px solid currentColor;
+  border-radius: 50%;
+  background: var(--bsbt-lcd-bg);
+}
+
+#bs-biotracker-settings .bs-bt-cognition-entry > summary {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0;
+  list-style: none;
+  cursor: pointer;
+}
+
+#bs-biotracker-settings .bs-bt-cognition-entry > summary::-webkit-details-marker {
+  display: none;
+}
+
+#bs-biotracker-settings .bs-bt-cognition-entry > summary::before {
+  content: '▸';
+  flex: 0 0 1ch;
+}
+
+#bs-biotracker-settings .bs-bt-cognition-entry[open] > summary::before {
+  content: '▾';
+}
+
+#bs-biotracker-settings .bs-bt-cognition-entry > summary:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+
+#bs-biotracker-settings .bs-bt-cognition-entry .bs-bt-track-card-note {
+  margin-top: 8px;
+}
+
+#bs-biotracker-settings .bs-bt-cognition-timeline .bs-bt-track-card-note {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 #bs-biotracker-settings .bs-bt-track-radar-wrap {
@@ -3812,6 +4215,86 @@
   display: none !important;
 }
 
+/* 说明连结：一个小圆圈问号，点开机制说明；解释交给文件，界面只留入口 */
+#bs-biotracker-settings .bs-bt-doc-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 1.3em;
+  height: 1.3em;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  font-size: 0.8em;
+  line-height: 1;
+  text-decoration: none;
+  color: inherit;
+  opacity: 0.75;
+}
+
+#bs-biotracker-settings .bs-bt-doc-link:hover,
+#bs-biotracker-settings .bs-bt-doc-link:focus-visible {
+  opacity: 1;
+}
+
+#bs-biotracker-settings .bs-bt-gestation-slider {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+}
+
+#bs-biotracker-settings .bs-bt-gestation-slider-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+#bs-biotracker-settings .bs-bt-gestation-slider-freeze {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+#bs-biotracker-settings .bs-bt-gestation-slider input[type="range"] {
+  width: 100%;
+  margin: 0;
+}
+
+#bs-biotracker-settings .bs-bt-gestation-slider-scale {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.75em;
+  opacity: 0.75;
+}
+
+#bs-biotracker-settings .bs-bt-override-list {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+#bs-biotracker-settings .bs-bt-override-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+#bs-biotracker-settings .bs-bt-override-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* 通用 .menu_button 是 width: 100%，放在同一列会把名称挤成一字一行 */
+#bs-biotracker-settings .bs-bt-override-clear {
+  flex: 0 0 auto;
+  width: auto;
+  white-space: nowrap;
+}
+
 #bs-biotracker-settings #bs-bt-view-track .menu_button,
 #bs-biotracker-settings #bs-bt-view-track .text_pole,
 #bs-biotracker-settings #bs-bt-view-track textarea,
@@ -4027,11 +4510,12 @@
 
 #bs-biotracker-settings .bs-bt-wardrobe-row-wrap {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 26px;
+  grid-template-columns: minmax(0, 1fr) 26px 26px;
   align-items: center;
   gap: 8px;
 }
 
+#bs-biotracker-settings .bs-bt-wardrobe-row-edit,
 #bs-biotracker-settings .bs-bt-wardrobe-row-delete {
   width: 24px;
   min-width: 24px;
@@ -4049,9 +4533,70 @@
   opacity: 0.72;
 }
 
+#bs-biotracker-settings .bs-bt-wardrobe-row-edit:hover,
 #bs-biotracker-settings .bs-bt-wardrobe-row-delete:hover {
   opacity: 1;
   border-color: currentColor;
+}
+
+#bs-biotracker-settings .bs-bt-race-screen-modal {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  box-sizing: border-box;
+  padding: 12px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  background: var(--bsbt-lcd-bg);
+  color: var(--bsbt-lcd-text);
+}
+
+#bs-biotracker-settings .bs-bt-race-screen-modal[hidden] {
+  display: none;
+}
+
+#bs-biotracker-settings .bs-bt-race-screen-modal .bs-bt-race-palette {
+  min-height: 100%;
+  align-content: start;
+}
+
+#bs-biotracker-settings .bs-bt-race-screen-modal .bs-bt-race-palette-head {
+  position: sticky;
+  top: -12px;
+  z-index: 1;
+  margin: -12px -12px 0;
+  padding: 12px;
+  border-bottom: 1px solid color-mix(in srgb, currentColor 28%, transparent);
+  background: var(--bsbt-lcd-bg);
+}
+
+#bs-biotracker-settings .bs-bt-wardrobe-item-editor {
+  display: grid;
+  gap: 7px;
+  margin: 10px 0;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--bsbt-border-color) 55%, transparent);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+#bs-biotracker-settings .bs-bt-wardrobe-item-editor label {
+  display: grid;
+  gap: 4px;
+  font-size: 0.88em;
+}
+
+#bs-biotracker-settings .bs-bt-wardrobe-editor-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+#bs-biotracker-settings .bs-bt-wardrobe-editor-actions .menu_button {
+  width: 100%;
+  margin: 0;
 }
 
 #bs-biotracker-settings #bs-bt-wardrobe-add-page[hidden],
@@ -4062,6 +4607,138 @@
 
 #bs-biotracker-settings .bs-bt-wardrobe-tabs {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+#bs-biotracker-settings .bs-bt-api-profile-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+#bs-biotracker-settings .bs-bt-api-profile-row > .text_pole {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+}
+
+#bs-biotracker-settings .bs-bt-api-profile-row > .menu_button {
+  flex: 0 0 auto;
+  width: auto;
+  margin: 0;
+}
+
+/* 基准页的名录勾选：按胚胎型态分组，一眼勾完本故事会出现的种族 */
+#bs-biotracker-settings .bs-bt-catalog-checklist {
+  display: grid;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+/* 写实世界开启时名录不会送出 */
+#bs-biotracker-settings .bs-bt-catalog-checklist.is-disabled {
+  opacity: 0.55;
+}
+
+#bs-biotracker-settings .bs-bt-catalog-group {
+  min-width: 0;
+  margin: 0;
+  padding: 7px 9px;
+  border: 1px solid color-mix(in srgb, currentColor 24%, transparent);
+  border-radius: 8px;
+}
+
+#bs-biotracker-settings .bs-bt-catalog-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 0.86em;
+}
+
+#bs-biotracker-settings .bs-bt-catalog-group-head > .menu_button {
+  flex: 0 0 auto;
+  width: auto;
+  margin: 0;
+  padding: 2px 8px;
+  font-size: 0.92em;
+}
+
+#bs-biotracker-settings .bs-bt-catalog-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(88px, 1fr));
+  gap: 4px 8px;
+}
+
+#bs-biotracker-settings .bs-bt-catalog-options label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#bs-biotracker-settings .bs-bt-wardrobe-transient {
+  display: grid;
+  gap: 6px;
+}
+
+#bs-biotracker-settings .bs-bt-wardrobe-transient-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+#bs-biotracker-settings .bs-bt-wardrobe-transient-row > .menu_button {
+  flex: 0 0 auto;
+  width: auto;
+  margin: 0;
+}
+
+#bs-biotracker-settings .bs-bt-wardrobe-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 分类标题后的加号：点开新增视窗，类型与分类已按这一栏带好 */
+#bs-biotracker-settings .bs-bt-wardrobe-group-add {
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--bsbt-border-color);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bsbt-lcd-bg) 78%, var(--bsbt-pager-bg) 22%);
+  color: inherit;
+  font: inherit;
+  font-weight: 800;
+  line-height: 1;
+  cursor: pointer;
+}
+
+#bs-biotracker-settings #bs-bt-wardrobe-head > [data-wardrobe-back] {
+  flex: 0 0 auto;
+  width: auto;
+  margin: 0;
+}
+
+#bs-biotracker-settings #bs-bt-wardrobe-head-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+}
+
+#bs-biotracker-settings #bs-bt-wardrobe-head[hidden],
+#bs-biotracker-settings #bs-bt-wardrobe-tabs-section[hidden] {
+  display: none;
 }
 
 #bs-biotracker-settings .bs-bt-wardrobe-outfit-editor,
@@ -4086,14 +4763,46 @@
 }
 
 #bs-biotracker-settings #bs-bt-wardrobe-item-note {
-  min-height: 90px;
-  resize: vertical;
+  min-height: 56px;
 }
 
 #bs-biotracker-settings .bs-bt-wardrobe-accessory-checks {
   display: flex;
   flex-wrap: wrap;
   gap: 6px 12px;
+}
+
+#bs-biotracker-settings .bs-bt-wardrobe-accessory-checks fieldset,
+#bs-biotracker-settings #bs-bt-wardrobe-item-effects-field {
+  min-width: 0;
+  margin: 0;
+  padding: 7px 9px;
+  border: 1px solid color-mix(in srgb, currentColor 24%, transparent);
+  border-radius: 8px;
+}
+
+#bs-biotracker-settings .bs-bt-wardrobe-accessory-checks fieldset {
+  display: flex;
+  flex: 1 1 180px;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+}
+
+#bs-biotracker-settings #bs-bt-wardrobe-item-effects-field {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 10px;
+}
+
+#bs-biotracker-settings #bs-bt-wardrobe-item-effects-field[hidden] {
+  display: none;
+}
+
+#bs-biotracker-settings .bs-bt-wardrobe-accessory-checks legend,
+#bs-biotracker-settings #bs-bt-wardrobe-item-effects-field legend {
+  padding: 0 4px;
+  opacity: 0.78;
+  font-size: 0.82em;
 }
 
 @media (max-width: 560px) {
@@ -4107,6 +4816,10 @@
   #bs-biotracker-settings .bs-bt-wardrobe-editor-wide,
   #bs-biotracker-settings .bs-bt-wardrobe-outfit-editor > .menu_button {
     grid-column: auto;
+  }
+
+  #bs-biotracker-settings #bs-bt-wardrobe-item-effects-field {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -4138,6 +4851,11 @@
   font-size: 0.9em;
 }
 
+/* 气泡被限制在萤幕宽度内，四格一排会挤爆，改成两排 */
+#bs-biotracker-settings .bs-bt-wardrobe-detail-bubble .bs-bt-wardrobe-metrics {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 #bs-biotracker-settings .bs-bt-wardrobe-metric,
 .bs-bt-wardrobe-detail-bubble .bs-bt-wardrobe-metric {
   border: 1px solid color-mix(in srgb, var(--bsbt-lcd-text) 14%, transparent);
@@ -4153,8 +4871,10 @@
 .bs-bt-wardrobe-detail-bubble {
   position: fixed;
   z-index: 10050;
-  width: min(320px, calc(100vw - 20px));
+  width: max-content;
+  max-width: min(320px, calc(100vw - 20px));
   max-height: min(420px, calc(100vh - 20px));
+  box-sizing: border-box;
   overflow: auto;
   border: 1px solid color-mix(in srgb, var(--bsbt-lcd-text) 28%, transparent);
   border-radius: 8px;
@@ -4409,7 +5129,7 @@
   white-space: nowrap;
 }
 
-/* ── 精液来源占比环 ────────────────────────────────────────
+/* ── 精液来源占比环（单一或多个来源统一呈现） ──────────────
    同一个 currentColor 的阶梯透明度 + 分隔缺口，不引入新色盘，
    12 套主题下都读得出来。 */
 #bs-biotracker-settings .bs-bt-sperm-share {
@@ -4419,10 +5139,35 @@
   margin-bottom: 10px;
 }
 
+#bs-biotracker-settings .bs-bt-sperm-share__visual {
+  flex: 0 0 94px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 0;
+}
+
 #bs-biotracker-settings .bs-bt-sperm-share__ring {
-  flex: 0 0 auto;
   width: 84px;
   height: 84px;
+}
+
+#bs-biotracker-settings .bs-bt-sperm-share__chance {
+  margin-top: -2px;
+  font-size: 0.68rem;
+  line-height: 1.2;
+  text-align: center;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.82;
+}
+
+#bs-biotracker-settings .bs-bt-sperm-share__chance strong {
+  font-weight: 700;
+}
+
+#bs-biotracker-settings .bs-bt-sperm-share__status {
+  margin-left: auto;
 }
 
 #bs-biotracker-settings .bs-bt-sperm-share__total {
@@ -4459,16 +5204,44 @@
 }
 
 #bs-biotracker-settings .bs-bt-sperm-share__name {
-  flex: 1 1 auto;
-  min-width: 0;
+  display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-#bs-biotracker-settings .bs-bt-sperm-share__pct {
-  flex: 0 0 auto;
-  font-weight: 700;
+#bs-biotracker-settings .bs-bt-track-title-badge.is-conceived {
+  background: color-mix(in srgb, currentColor 22%, transparent);
+  border-color: color-mix(in srgb, currentColor 62%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, currentColor 14%, transparent),
+    0 0 9px color-mix(in srgb, currentColor 46%, transparent);
+  opacity: 1;
+  animation: bs-bt-conceived-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes bs-bt-conceived-pulse {
+  0%, 100% { filter: brightness(0.9); transform: scale(1); }
+  50% { filter: brightness(1.35); transform: scale(1.04); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #bs-biotracker-settings .bs-bt-track-title-badge.is-conceived {
+    animation: none;
+  }
+}
+
+#bs-biotracker-settings .bs-bt-sperm-share__identity {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+#bs-biotracker-settings .bs-bt-sperm-share__race {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.85em;
+  opacity: 0.62;
 }
 
 #bs-biotracker-settings .bs-bt-sperm-share__val {
@@ -4479,16 +5252,26 @@
 }
 
 /* ── 血缘视窗 ──────────────────────────────────────────────
-   独立全屏覆盖层，挂在 body 下（与浮球同样自带主题 class），
-   不放进面板内部以免被 modal 的 transform 困住 position: fixed。
+   独立全屏覆盖层，挂在 modal 根节点、可拖曳 dialog 的同层（与浮球同样自带主题 class），
+   避免手机浏览器把 dialog 提升为合成层后反过来盖住族谱。
    版面走「分代横排 + 手足成丛」：同一对亲代的孩子聚成一丛，
    丛上方挂亲代标注，再用一条横杆与各自的竖线连到每张卡。 */
 .bs-bt-lineage {
   position: fixed;
   inset: 0;
   z-index: 10050;
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  height: 100dvh;
+  max-width: 100vw;
+  max-height: 100dvh;
   display: none;
   flex-direction: column;
+  overflow: hidden;
+  overscroll-behavior: contain;
+  pointer-events: auto;
+  isolation: isolate;
   background: var(--bsbt-pager-bg);
   color: var(--bsbt-off-text);
   font-family: var(--bsbt-font-main);
@@ -4542,14 +5325,18 @@
 .bs-bt-lineage__body {
   flex: 1 1 auto;
   min-height: 0;
+  width: 100%;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 .bs-bt-lineage__chart {
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
   padding: 14px 12px 20px;
 }
 
@@ -4580,6 +5367,8 @@
 /* 窄屏放不下就整列横向卷动；用 max-content + min-width 让内容少时仍居中 */
 .bs-bt-lineage__row-scroll {
   overflow-x: auto;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
   padding-bottom: 4px;
 }
 
@@ -4873,13 +5662,16 @@
   }
 }
 
-/* 注册页的特殊胎儿来历：默认收合，因为注册不一定产生怀孕，多数时候用不到 */
-.bs-bt-special-fetus > summary {
+/* 注册页的特殊胎儿来历：默认收合，因为注册不一定产生怀孕，多数时候用不到。
+   两段描述规则同理：预设值通常不用改，收起来免得占满注册页 */
+.bs-bt-special-fetus > summary,
+.bs-bt-register-fold > summary {
   cursor: pointer;
   font-weight: 600;
   padding: 4px 0;
 }
-.bs-bt-special-fetus[open] > summary {
+.bs-bt-special-fetus[open] > summary,
+.bs-bt-register-fold[open] > summary {
   margin-bottom: 6px;
 }
 
@@ -4937,4 +5729,448 @@
 }
 .bs-bt-special-body small {
   opacity: 0.8;
+}
+
+/* ── 按压回馈 ─────────────────────────────────────────
+   手机没有 hover，按下去要立刻看得到反应：略缩小、略变暗。
+   减少动态效果时只变暗不缩放；停用中的按钮不触发。 */
+#bs-biotracker-settings :is(.menu_button, .bs-bt-track-tab, .bs-bt-track-character-button, .bs-bt-theme-option, .bs-bt-size-option, .bs-bt-menu-card) {
+  -webkit-tap-highlight-color: transparent;
+  transition: transform 80ms ease-out, filter 80ms ease-out;
+}
+
+#bs-biotracker-settings :is(.menu_button, .bs-bt-track-tab, .bs-bt-track-character-button, .bs-bt-theme-option, .bs-bt-size-option, .bs-bt-menu-card):active:not(:disabled):not([disabled]):not([aria-busy='true']) {
+  transform: scale(0.97);
+  filter: brightness(0.92);
+}
+
+/* 停用中的一般按钮要看得出来不能按 */
+#bs-biotracker-settings .menu_button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* 处理中（aria-busy）：不只是停用，还有缓慢移动的斜纹表示正在进行 */
+#bs-biotracker-settings .menu_button[aria-busy='true'] {
+  opacity: 0.85;
+  cursor: progress;
+  background-image: repeating-linear-gradient(
+    -45deg,
+    rgba(127, 127, 127, 0.22) 0 8px,
+    transparent 8px 16px
+  );
+  background-size: 22.63px 22.63px;
+  animation: bsbt-busy-stripes 0.8s linear infinite;
+}
+
+@keyframes bsbt-busy-stripes {
+  from { background-position: 0 0; }
+  to { background-position: 22.63px 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #bs-biotracker-settings :is(.menu_button, .bs-bt-track-tab, .bs-bt-track-character-button, .bs-bt-theme-option, .bs-bt-size-option, .bs-bt-menu-card) {
+    transition: filter 80ms ease-out;
+  }
+
+  #bs-biotracker-settings :is(.menu_button, .bs-bt-track-tab, .bs-bt-track-character-button, .bs-bt-theme-option, .bs-bt-size-option, .bs-bt-menu-card):active:not(:disabled):not([disabled]):not([aria-busy='true']) {
+    transform: none;
+  }
+
+  #bs-biotracker-settings .menu_button[aria-busy='true'] {
+    animation: none;
+  }
+}
+
+/* ── 子宫像素图与胎儿卡 ─────────────────────────────── */
+#bs-biotracker-settings .bs-bt-womb {
+  position: relative;
+  display: flex;
+  justify-content: center;
+}
+
+/* 占位与画布同尺寸：追踪页重绘时页面高度不变，捲动位置才不会被拉回 */
+#bs-biotracker-settings .bs-bt-womb-slot,
+#bs-biotracker-settings .bs-bt-womb-canvas {
+  display: block;
+  width: 192px;
+  height: 240px;
+  box-sizing: content-box;
+  border: 2px solid var(--bsbt-border-color);
+  border-radius: 4px;
+}
+
+#bs-biotracker-settings .bs-bt-womb-canvas {
+  image-rendering: pixelated;
+}
+
+#bs-biotracker-settings .bs-bt-womb-cards-toggle,
+#bs-biotracker-settings .bs-bt-womb-replay {
+  position: absolute;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 2px solid var(--bsbt-border-color);
+  border-radius: 4px;
+  background: var(--bsbt-lcd-bg);
+  color: var(--bsbt-lcd-text);
+  cursor: pointer;
+}
+
+/* 胎儿卡按钮在左上，特写小窗在右上 */
+#bs-biotracker-settings .bs-bt-womb-cards-toggle {
+  top: 6px;
+  left: calc(50% - 96px + 6px);
+}
+
+#bs-biotracker-settings .bs-bt-womb-replay {
+  bottom: 6px;
+  right: calc(50% - 96px + 6px);
+}
+
+#bs-biotracker-settings .bs-bt-womb-cards-toggle svg,
+#bs-biotracker-settings .bs-bt-womb-replay svg {
+  width: 16px;
+  height: 16px;
+  shape-rendering: crispEdges;
+}
+
+#bs-biotracker-settings .bs-bt-womb-cards-toggle[aria-expanded='true'] {
+  background: var(--bsbt-lcd-text);
+  color: var(--bsbt-lcd-bg);
+}
+
+/* Sol 6 式：浮在子宫图上、按钮下方的紧凑面板 */
+#bs-biotracker-settings .bs-bt-womb-cards {
+  position: absolute;
+  top: 42px;
+  left: calc(50% - 96px + 6px);
+  z-index: 4;
+  width: 184px;
+  max-height: 200px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 8px 10px;
+  box-sizing: border-box;
+  border: 2px solid var(--bsbt-border-color);
+  background: var(--bsbt-lcd-bg);
+  color: var(--bsbt-lcd-text);
+  box-shadow: 4px 4px 0 rgba(0, 0, 0, 0.45);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+#bs-biotracker-settings .bs-bt-womb-cards h3 {
+  margin: 0 0 4px;
+  font-size: 12px;
+  letter-spacing: 0.12em;
+}
+
+/* 每胎一个折叠段落：标题列常驻，展开看其余资料 */
+#bs-biotracker-settings .bs-bt-womb-card {
+  padding: 6px 0;
+  border-top: 1px solid rgba(0, 0, 0, 0.25);
+}
+
+#bs-biotracker-settings .bs-bt-womb-card > summary {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  list-style: none;
+  cursor: pointer;
+}
+
+#bs-biotracker-settings .bs-bt-womb-card > summary::-webkit-details-marker {
+  display: none;
+}
+
+#bs-biotracker-settings .bs-bt-womb-card > summary:focus-visible {
+  outline: 2px solid var(--bsbt-lcd-text);
+  outline-offset: 2px;
+}
+
+#bs-biotracker-settings .bs-bt-womb-card-title {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+/* 缩图下方的胎重倍率 */
+#bs-biotracker-settings .bs-bt-womb-thumb-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+}
+
+#bs-biotracker-settings .bs-bt-womb-weight {
+  font-size: 10px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+#bs-biotracker-settings .bs-bt-womb-thumb {
+  cursor: pointer;
+}
+
+/* 先露胎：缩图换上金色外框，不占标题列的宽度 */
+#bs-biotracker-settings .bs-bt-womb-thumb.is-presenting {
+  border: 2px solid #e8b84a;
+  box-shadow: 0 0 0 1px var(--bsbt-border-color);
+}
+
+#bs-biotracker-settings .bs-bt-womb-card-title::after {
+  content: '▸';
+  margin-left: auto;
+  opacity: 0.6;
+}
+
+#bs-biotracker-settings .bs-bt-womb-card[open] .bs-bt-womb-card-title::after {
+  content: '▾';
+}
+
+#bs-biotracker-settings .bs-bt-womb-card-body {
+  padding: 4px 0 0 40px;
+}
+
+#bs-biotracker-settings .bs-bt-womb-thumb {
+  width: 32px;
+  height: 32px;
+  image-rendering: pixelated;
+  border: 1px solid var(--bsbt-border-color);
+}
+
+#bs-biotracker-settings .bs-bt-womb-card-title {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+}
+
+#bs-biotracker-settings .bs-bt-womb-gender {
+  width: 12px;
+  height: 12px;
+  image-rendering: pixelated;
+  background: var(--bsbt-lcd-text);
+  border-radius: 2px;
+}
+
+#bs-biotracker-settings .bs-bt-womb-card-line {
+  display: block;
+  opacity: 0.85;
+}
+
+/* 阻塞与宫压警告写在子宫图底下，反白配色跟着主题走；一律单行，万一过长就截断 */
+#bs-biotracker-settings .bs-bt-womb-alert {
+  margin: 8px auto 0;
+  padding: 3px 10px;
+  width: fit-content;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
+  border: 2px solid var(--bsbt-border-color);
+  border-radius: 4px;
+  background: var(--bsbt-lcd-text);
+  color: var(--bsbt-lcd-bg);
+  font-weight: 700;
+  text-align: center;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 宫压危机下次推进就会发生：警告闪烁 */
+#bs-biotracker-settings .bs-bt-womb-alert.is-imminent {
+  animation: bs-bt-womb-alert-blink 1s steps(2, jump-none) infinite;
+}
+
+@keyframes bs-bt-womb-alert-blink {
+  from { opacity: 1; }
+  to { opacity: 0.45; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #bs-biotracker-settings .bs-bt-womb-alert.is-imminent {
+    animation: none;
+  }
+}
+
+#bs-biotracker-settings .bs-bt-womb-card .bs-bt-fetus-tags {
+  margin: 2px 0;
+}
+
+#bs-biotracker-settings .bs-bt-womb-talents summary {
+  cursor: pointer;
+}
+
+/* holo 的萤幕底色是半透明，反白会看不见字；改用它选中项目的发光样式 */
+#bs-biotracker-settings.theme-holo .bs-bt-womb-alert {
+  background: rgba(141, 247, 255, 0.18);
+  color: #d9fdff;
+  box-shadow:
+    inset 0 0 16px rgba(141, 247, 255, 0.18),
+    0 0 14px rgba(78, 222, 255, 0.28);
+}
+
+/* 插件内的说明阅读器：盖满萤幕，读随插件安装的 docs/ */
+#bs-biotracker-settings .bs-bt-doc-viewer {
+  position: absolute;
+  inset: 0;
+  z-index: 41;
+  display: flex;
+  flex-direction: column;
+  background: var(--bsbt-lcd-bg);
+  color: var(--bsbt-lcd-text);
+}
+
+#bs-biotracker-settings .bs-bt-doc-viewer[hidden] {
+  display: none;
+}
+
+#bs-biotracker-settings .bs-bt-doc-viewer-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid color-mix(in srgb, currentColor 28%, transparent);
+}
+
+#bs-biotracker-settings .bs-bt-doc-viewer-head [hidden] {
+  display: none;
+}
+
+#bs-biotracker-settings .bs-bt-doc-viewer-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 700;
+}
+
+#bs-biotracker-settings .bs-bt-doc-viewer-external {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  text-decoration: none;
+}
+
+#bs-biotracker-settings .bs-bt-doc-viewer-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 4px 12px 16px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  font-size: 0.9em;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+#bs-biotracker-settings .bs-bt-doc-viewer-body h1,
+#bs-biotracker-settings .bs-bt-doc-viewer-body h2,
+#bs-biotracker-settings .bs-bt-doc-viewer-body h3,
+#bs-biotracker-settings .bs-bt-doc-viewer-body h4 {
+  margin: 1em 0 0.4em;
+  line-height: 1.35;
+  color: inherit;
+}
+
+#bs-biotracker-settings .bs-bt-doc-viewer-body h1 { font-size: 1.3em; }
+#bs-biotracker-settings .bs-bt-doc-viewer-body h2 { font-size: 1.15em; }
+#bs-biotracker-settings .bs-bt-doc-viewer-body h3 { font-size: 1.05em; }
+
+#bs-biotracker-settings .bs-bt-doc-viewer-body .is-doc-target {
+  outline: 1px dashed currentColor;
+  outline-offset: 3px;
+}
+
+#bs-biotracker-settings .bs-bt-doc-viewer-body p,
+#bs-biotracker-settings .bs-bt-doc-viewer-body ul,
+#bs-biotracker-settings .bs-bt-doc-viewer-body ol {
+  margin: 0.5em 0;
+}
+
+#bs-biotracker-settings .bs-bt-doc-viewer-body ul,
+#bs-biotracker-settings .bs-bt-doc-viewer-body ol {
+  padding-left: 1.4em;
+}
+
+#bs-biotracker-settings .bs-bt-doc-viewer-body a {
+  color: inherit;
+  text-decoration: underline;
+}
+
+#bs-biotracker-settings .bs-bt-doc-viewer-body code {
+  padding: 0 3px;
+  border-radius: 3px;
+  background: color-mix(in srgb, currentColor 12%, transparent);
+  font-size: 0.92em;
+}
+
+#bs-biotracker-settings .bs-bt-doc-viewer-body pre {
+  overflow-x: auto;
+  padding: 8px;
+  border-radius: 6px;
+  background: color-mix(in srgb, currentColor 10%, transparent);
+}
+
+#bs-biotracker-settings .bs-bt-doc-viewer-body pre code {
+  padding: 0;
+  background: none;
+}
+
+#bs-biotracker-settings .bs-bt-doc-table {
+  overflow-x: auto;
+  margin: 0.5em 0;
+}
+
+#bs-biotracker-settings .bs-bt-doc-table table {
+  border-collapse: collapse;
+  font-size: 0.92em;
+}
+
+#bs-biotracker-settings .bs-bt-doc-table th,
+#bs-biotracker-settings .bs-bt-doc-table td {
+  padding: 4px 6px;
+  border: 1px solid color-mix(in srgb, currentColor 28%, transparent);
+  text-align: left;
+  vertical-align: top;
+}
+
+/* Reproductive baseline and optional author-seeded beliefs use existing pages. */
+.bs-bt-reproductive-controls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+.bs-bt-reproductive-controls label,
+.bs-bt-cognition-row label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.bs-bt-cognition-row { display: grid; gap: 8px; margin-block: 8px; }
+
+/* 族谱肖像：有种族图示时改成圆角方形，让衍生外框的角饰有空间；颜色跟随主题文字色 */
+.bs-bt-lineage__portrait.has-icon {
+  border-radius: 10px;
+  padding: 2px;
+}
+
+.bs-bt-lineage__portrait .bs-bt-race-icon {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* 「本人」徽章往上凸出 9px；列外层的横向卷动会连带裁掉纵向溢出，没有亲代连线留白的那排要自己留空间 */
+.bs-bt-lineage__cluster-cards:not(.has-link) {
+  padding-top: 10px;
 }

@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import test, { afterEach } from 'node:test';
 
-import { buildPayloadWithMainflowCopy, callOpenAICompatible, fetchModelList, isApiDeadlineError, isApiTimeoutError, resolveApiTimeoutMs, resolveOverallDeadlineMs } from '../scripts/api.js';
-import { API_FORMATS, getApiUrlForFormat, normalizeApiFormat } from '../scripts/state.js';
+import { abortActiveApiRequests, buildPayloadWithMainflowCopy, callOpenAICompatible, fetchModelList, getActiveApiRequests, isApiDeadlineError, isApiTimeoutError, isApiUserAbortError, resolveApiTimeoutMs, resolveOverallDeadlineMs } from '../scripts/api.js';
+import { API_FORMATS, getApiUrlForFormat, getSettings, normalizeApiFormat, normalizeReasoningEffort, normalizeTemperatureMode, resolveUserTemperature } from '../scripts/state.js';
 
 const ORIGINAL_GLOBALS = {
   fetch: globalThis.fetch,
@@ -344,4 +344,503 @@ test('the overall deadline terminates a run that keeps failing, without hanging 
     (error) => isApiDeadlineError(error) && /总时限/.test(error.message),
   );
   assert.ok(calls > 0 && calls < 20, `请求次数应有界，实际 ${calls}`);
+});
+const RESPONSES_RESULT = {
+  output: [{
+    type: 'message',
+    role: 'assistant',
+    content: [{ type: 'output_text', text: JSON.stringify({ operations: [] }) }],
+  }],
+};
+
+test('openai_responses format on vanilla SillyTavern goes through the /proxy/ transparent proxy', async () => {
+  const calls = [];
+  installBrowserHost(async (url, options) => {
+    calls.push({ url, options });
+    return jsonResponse(RESPONSES_RESULT);
+  });
+
+  const result = await callOpenAICompatible({
+    apiUrl: 'https://opencode.example.test/zen/go/v1',
+    apiKey: 'go-key',
+    model: 'muse-spark-1.2-contributor',
+    apiFormat: 'openai_responses',
+  }, { recent_messages: [] }, 'Return JSON.');
+
+  assert.deepEqual(result, { operations: [] });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, '/proxy/https://opencode.example.test/zen/go/v1/responses');
+  const body = JSON.parse(calls[0].options.body);
+  assert.equal(body.model, 'muse-spark-1.2-contributor');
+  assert.equal(body.store, false);
+  assert.equal(Array.isArray(body.input), true);
+  assert.equal(body.input[0].role, 'developer');
+  assert.deepEqual(body.text, { format: { type: 'json_object' } });
+  assert.equal(calls[0].options.headers.Authorization, 'Bearer go-key');
+  assert.equal(calls[0].options.headers['X-CSRF-Token'], 'test-csrf');
+});
+
+test('openai_responses format falls back to direct when the transparent proxy is disabled (404)', async () => {
+  const calls = [];
+  installBrowserHost(async (url, options) => {
+    calls.push({ url, options });
+    if (url.startsWith('/proxy/')) {
+      return {
+        ok: false,
+        status: 404,
+        async text() {
+          return 'CORS proxy is disabled. Enable it in config.yaml or use the --corsProxy flag.';
+        },
+      };
+    }
+    return jsonResponse(RESPONSES_RESULT);
+  });
+
+  const result = await callOpenAICompatible({
+    apiUrl: 'https://opencode.example.test/zen/go/v1',
+    apiKey: 'go-key',
+    model: 'muse-spark-1.2-contributor',
+    apiFormat: 'openai_responses',
+  }, { recent_messages: [] }, 'Return JSON.');
+
+  assert.deepEqual(result, { operations: [] });
+  assert.deepEqual(calls.map((call) => call.url), [
+    '/proxy/https://opencode.example.test/zen/go/v1/responses',
+    'https://opencode.example.test/zen/go/v1/responses',
+  ]);
+});
+
+test('openai_responses format on TauriTavern uses the format-aware host proxy', async () => {
+  const calls = [];
+  globalThis.__TAURITAVERN__ = {};
+  try {
+    installBrowserHost(async (url, options) => {
+      calls.push({ url, options });
+      return jsonResponse({ choices: [{ message: { content: JSON.stringify({ operations: [] }) } }] });
+    });
+
+    const result = await callOpenAICompatible({
+      apiUrl: 'https://opencode.example.test/zen/go/v1',
+      apiKey: 'go-key',
+      model: 'muse-spark-1.2-contributor',
+      apiFormat: 'openai_responses',
+    }, { recent_messages: [] }, 'Return JSON.');
+
+    assert.deepEqual(result, { operations: [] });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, '/api/backends/chat-completions/generate');
+    const body = JSON.parse(calls[0].options.body);
+    assert.equal(body.custom_api_format, 'openai_responses');
+    assert.equal(body.model, 'muse-spark-1.2-contributor');
+    assert.equal(Array.isArray(body.messages), true);
+  } finally {
+    delete globalThis.__TAURITAVERN__;
+  }
+});
+
+test('claude_messages format converts to Anthropic shape through the transparent proxy', async () => {
+  const calls = [];
+  installBrowserHost(async (url, options) => {
+    calls.push({ url, options });
+    return jsonResponse({ content: [{ type: 'text', text: JSON.stringify({ operations: [] }) }] });
+  });
+
+  const result = await callOpenAICompatible({
+    apiUrl: 'https://opencode.example.test/zen/go/v1',
+    apiKey: 'go-key',
+    model: 'qwen3.8-max',
+    apiFormat: 'claude_messages',
+  }, { recent_messages: [] }, 'Return JSON.');
+
+  assert.deepEqual(result, { operations: [] });
+  assert.equal(calls[0].url, '/proxy/https://opencode.example.test/zen/go/v1/messages');
+  const body = JSON.parse(calls[0].options.body);
+  assert.equal(typeof body.system, 'string');
+  assert.ok(body.max_tokens >= 1);
+  assert.equal(body.messages.every((m) => m.role === 'user' || m.role === 'assistant'), true);
+  assert.equal(calls[0].options.headers['x-api-key'], 'go-key');
+  assert.equal(calls[0].options.headers['anthropic-version'], '2023-06-01');
+});
+
+const GEMINI_RESULT = {
+  status: 'completed',
+  steps: [{
+    type: 'model_output',
+    content: [{ type: 'text', text: JSON.stringify({ operations: [] }) }],
+  }],
+};
+
+test('gemini_interactions format builds steps + system_instruction and injects /v1beta', async () => {
+  const calls = [];
+  installBrowserHost(async (url, options) => {
+    calls.push({ url, options });
+    return jsonResponse(GEMINI_RESULT);
+  });
+
+  const result = await callOpenAICompatible({
+    // 裸主机名（无 /v1 或 /v1beta）：插件必须自动补 /v1beta，与 TauriTavern build_gemini_url 一致
+    apiUrl: 'https://generativelanguage.googleapis.com',
+    apiKey: 'goog-key',
+    model: 'gemini-2.5-pro',
+    apiFormat: 'gemini_interactions',
+  }, { recent_messages: [] }, 'Return JSON.');
+
+  assert.deepEqual(result, { operations: [] });
+  assert.equal(calls[0].url, '/proxy/https://generativelanguage.googleapis.com/v1beta/interactions');
+  const body = JSON.parse(calls[0].options.body);
+  assert.equal(body.model, 'gemini-2.5-pro');
+  assert.equal(body.stream, false);
+  assert.equal(body.store, false);
+  assert.equal(typeof body.system_instruction, 'string');
+  assert.ok(body.system_instruction.length > 0);
+  assert.equal(Array.isArray(body.input), true);
+  assert.equal(body.input.every((s) => s.type === 'user_input' || s.type === 'model_output'), true);
+  assert.equal(body.input.some((s) => s.type === 'user_input'), true);
+  assert.ok(body.input.every((s) => Array.isArray(s.content) && s.content.every((b) => b.type === 'text')));
+  assert.equal(calls[0].options.headers['x-goog-api-key'], 'goog-key');
+  assert.equal(calls[0].options.headers.Authorization, undefined);
+});
+
+test('gemini_interactions keeps an explicit /v1beta base without double-prefixing', async () => {
+  const calls = [];
+  installBrowserHost(async (url, options) => {
+    calls.push({ url, options });
+    return jsonResponse(GEMINI_RESULT);
+  });
+
+  await callOpenAICompatible({
+    apiUrl: 'https://generativelanguage.googleapis.com/v1beta',
+    apiKey: 'goog-key',
+    model: 'gemini-2.5-pro',
+    apiFormat: 'gemini_interactions',
+  }, { recent_messages: [] }, 'Return JSON.');
+
+  assert.equal(calls[0].url, '/proxy/https://generativelanguage.googleapis.com/v1beta/interactions');
+});
+
+test('gemini_interactions on TauriTavern accepts already-normalized OpenAI choices', async () => {
+  const calls = [];
+  globalThis.__TAURITAVERN__ = {};
+  try {
+    installBrowserHost(async (url, options) => {
+      calls.push({ url, options });
+      return jsonResponse({ choices: [{ message: { content: JSON.stringify({ operations: [] }) } }] });
+    });
+
+    const result = await callOpenAICompatible({
+      apiUrl: 'https://generativelanguage.googleapis.com/v1beta',
+      apiKey: 'goog-key',
+      model: 'gemini-2.5-pro',
+      apiFormat: 'gemini_interactions',
+    }, { recent_messages: [] }, 'Return JSON.');
+
+    assert.deepEqual(result, { operations: [] });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, '/api/backends/chat-completions/generate');
+    const body = JSON.parse(calls[0].options.body);
+    assert.equal(body.custom_api_format, 'gemini_interactions');
+    assert.equal(Array.isArray(body.messages), true);
+    assert.equal(body.custom_include_headers, 'x-goog-api-key: goog-key');
+    assert.doesNotMatch(body.custom_include_headers, /Authorization/);
+  } finally {
+    delete globalThis.__TAURITAVERN__;
+  }
+});
+
+test('gemini_interactions rejects a completed response with no model_output text', async () => {
+  installBrowserHost(async () => jsonResponse({
+    status: 'completed',
+    steps: [{ type: 'thought', signature: '' }],
+  }));
+
+  await assert.rejects(
+    callOpenAICompatible({
+      apiUrl: 'https://generativelanguage.googleapis.com/v1beta',
+      apiKey: 'goog-key',
+      model: 'gemini-2.5-pro',
+      apiFormat: 'gemini_interactions',
+      apiTimeoutMs: 1000,
+    }, { recent_messages: [] }, 'Return JSON.'),
+    (error) => /没有可消费的文本|总时限/.test(error.message),
+  );
+});
+
+test('gemini_interactions surfaces a failed status as a retriable error', async () => {
+  installBrowserHost(async () => jsonResponse({
+    status: 'failed',
+    error: { message: 'model overloaded' },
+  }));
+
+  await assert.rejects(
+    callOpenAICompatible({
+      apiUrl: 'https://generativelanguage.googleapis.com/v1beta',
+      apiKey: 'goog-key',
+      model: 'gemini-2.5-pro',
+      apiFormat: 'gemini_interactions',
+      apiTimeoutMs: 1000,
+    }, { recent_messages: [] }, 'Return JSON.'),
+    // failed 是可重试的上游错误：可能直接抛出，也可能在重试链里撞上总时限
+    (error) => /Gemini Interactions 回传失败|总时限/.test(error.message),
+  );
+});
+
+test('normalizeReasoningEffort accepts 8 levels with auto fallback', () => {
+  assert.equal(normalizeReasoningEffort('high'), 'high');
+  assert.equal(normalizeReasoningEffort('XHigh'), 'xhigh');
+  assert.equal(normalizeReasoningEffort('Minimal'), 'minimal');
+  assert.equal(normalizeReasoningEffort('Ultra'), 'ultra');
+  assert.equal(normalizeReasoningEffort('Auto'), 'auto');
+  assert.equal(normalizeReasoningEffort(undefined), 'auto');
+  assert.equal(normalizeReasoningEffort(''), 'auto');
+  // 已移除的 False 档：旧存档残留值按非法处理，回退 auto（不传参）
+  assert.equal(normalizeReasoningEffort('false'), 'auto');
+});
+
+function proxyBodyOf(calls) {
+  assert.equal(calls[0].url, '/api/backends/chat-completions/generate');
+  return JSON.parse(calls[0].options.body);
+}
+
+test('reasoning effort defaults to auto: parameter omitted on the host proxy body', async () => {
+  const calls = [];
+  installBrowserHost(async (url, options) => {
+    calls.push({ url, options });
+    return jsonResponse({
+      choices: [{ message: { content: JSON.stringify({ operations: [] }) } }],
+    });
+  });
+
+  await callOpenAICompatible({
+    apiUrl: 'https://example-model-host.test/v1/chat/completions',
+    apiKey: 'secret-key',
+    model: 'grok-compatible',
+  }, { recent_messages: [] }, 'Return JSON.');
+
+  // 默认 Auto = 不传 reasoning_effort——与插件引入该选项之前的请求体完全一致，
+  // 存量使用者零影响
+  assert.equal('reasoning_effort' in proxyBodyOf(calls), false);
+});
+
+test('reasoning effort auto/removed-false/invalid omit; levels pass through', async () => {
+  for (const [setting, expected, present] of [
+    ['auto', undefined, false],
+    // 已移除的 False 档：残留值回退 auto（省略），不会把 false 传给上游
+    ['false', undefined, false],
+    ['minimal', 'minimal', true],
+    ['high', 'high', true],
+    ['ultra', 'ultra', true],
+    ['max', 'max', true],
+  ]) {
+    const calls = [];
+    installBrowserHost(async (url, options) => {
+      calls.push({ url, options });
+      return jsonResponse({
+        choices: [{ message: { content: JSON.stringify({ operations: [] }) } }],
+      });
+    });
+    await callOpenAICompatible({
+      apiUrl: 'https://example-model-host.test/v1/chat/completions',
+      apiKey: 'secret-key',
+      model: 'grok-compatible',
+      reasoningEffort: setting,
+    }, { recent_messages: [] }, 'Return JSON.');
+    const body = proxyBodyOf(calls);
+    assert.equal('reasoning_effort' in body, present, `${setting} present=${present}`);
+    if (present) assert.equal(body.reasoning_effort, expected);
+  }
+});
+
+test('reasoning effort rides the format-aware host proxy for non-compat formats', async () => {
+  const calls = [];
+  globalThis.__TAURITAVERN__ = {};
+  try {
+    installBrowserHost(async (url, options) => {
+      calls.push({ url, options });
+      return jsonResponse({ choices: [{ message: { content: JSON.stringify({ operations: [] }) } }] });
+    });
+
+    await callOpenAICompatible({
+      apiUrl: 'https://opencode.example.test/zen/go/v1',
+      apiKey: 'go-key',
+      model: 'muse-spark-1.2-contributor',
+      apiFormat: 'openai_responses',
+      reasoningEffort: 'xhigh',
+    }, { recent_messages: [] }, 'Return JSON.');
+
+    const body = proxyBodyOf(calls);
+    assert.equal(body.custom_api_format, 'openai_responses');
+    assert.equal(body.reasoning_effort, 'xhigh');
+  } finally {
+    delete globalThis.__TAURITAVERN__;
+  }
+});
+
+test('direct Responses payload carries reasoning.effort; direct Claude omits it', async () => {
+  // Responses 直连（透传代理 404 回退）：档位进 reasoning.effort
+  const responsesCalls = [];
+  installBrowserHost(async (url, options) => {
+    responsesCalls.push({ url, options });
+    if (url.startsWith('/proxy/')) {
+      return { ok: false, status: 404, async text() { return 'disabled'; } };
+    }
+    return jsonResponse(RESPONSES_RESULT);
+  });
+  await callOpenAICompatible({
+    apiUrl: 'https://opencode.example.test/zen/go/v1',
+    apiKey: 'go-key',
+    model: 'muse-spark-1.2-contributor',
+    apiFormat: 'openai_responses',
+    reasoningEffort: 'high',
+  }, { recent_messages: [] }, 'Return JSON.');
+  const responsesBody = JSON.parse(responsesCalls[responsesCalls.length - 1].options.body);
+  assert.deepEqual(responsesBody.reasoning, { effort: 'high' });
+
+  // Claude 直连原生格式没有档位概念（thinking 要 token 数）：不发送，不编造
+  const claudeCalls = [];
+  installBrowserHost(async (url, options) => {
+    claudeCalls.push({ url, options });
+    return jsonResponse({ content: [{ type: 'text', text: JSON.stringify({ operations: [] }) }] });
+  });
+  await callOpenAICompatible({
+    apiUrl: 'https://opencode.example.test/zen/go/v1',
+    apiKey: 'go-key',
+    model: 'qwen3.8-max',
+    apiFormat: 'claude_messages',
+    reasoningEffort: 'high',
+  }, { recent_messages: [] }, 'Return JSON.');
+  const claudeBody = JSON.parse(claudeCalls[0].options.body);
+  assert.equal('reasoning_effort' in claudeBody, false);
+  assert.equal('reasoning' in claudeBody, false);
+  assert.equal('thinking' in claudeBody, false);
+});
+
+async function collectTemperaturesThroughJsonRetry(settings) {
+  const temps = [];
+  let calls = 0;
+  installBrowserHost(async (url, options) => {
+    calls += 1;
+    temps.push(JSON.parse(options.body).temperature);
+    // 首轮回非 JSON，逼出同轮 JSON 纠错重试
+    const content = calls === 1 ? 'not json' : JSON.stringify({ operations: [] });
+    return jsonResponse({ choices: [{ message: { content } }] });
+  });
+  await callOpenAICompatible({
+    apiUrl: 'https://relay.example.test/v1',
+    apiKey: 'k',
+    model: 'm',
+    apiTimeoutMs: 180000,
+    ...settings,
+  }, { recent_messages: [] }, 'Return JSON.');
+  return temps;
+}
+
+test('normalizeTemperatureMode defaults to legacy with three states', () => {
+  assert.equal(normalizeTemperatureMode('omit'), 'omit');
+  assert.equal(normalizeTemperatureMode('Manual'), 'manual');
+  assert.equal(normalizeTemperatureMode('legacy'), 'legacy');
+  assert.equal(normalizeTemperatureMode(undefined), 'legacy');
+  assert.equal(normalizeTemperatureMode(''), 'legacy');
+  assert.equal(normalizeTemperatureMode('auto'), 'legacy');
+});
+
+test('temperature default and legacy follow upstream logic: 0.2 primary, 0.1 retry', async () => {
+  assert.deepEqual(await collectTemperaturesThroughJsonRetry({}), [0.2, 0.1]);
+  assert.deepEqual(await collectTemperaturesThroughJsonRetry({ temperature: null }), [0.2, 0.1]);
+  assert.deepEqual(await collectTemperaturesThroughJsonRetry({ temperatureMode: 'legacy' }), [0.2, 0.1]);
+  // 非 manual 档的裸 0.2 仍走上游逻辑（0.2 是否固定由档位决定）
+  assert.deepEqual(await collectTemperaturesThroughJsonRetry({ temperature: 0.2 }), [0.2, 0.1]);
+});
+
+test('temperature omit mode sends no temperature on primary or retry', async () => {
+  const bodies = [];
+  let calls = 0;
+  installBrowserHost(async (url, options) => {
+    calls += 1;
+    bodies.push(JSON.parse(options.body));
+    const content = calls === 1 ? 'not json' : JSON.stringify({ operations: [] });
+    return jsonResponse({ choices: [{ message: { content } }] });
+  });
+  await callOpenAICompatible({
+    apiUrl: 'https://relay.example.test/v1',
+    apiKey: 'k',
+    model: 'm',
+    apiTimeoutMs: 180000,
+    temperatureMode: 'omit',
+  }, { recent_messages: [] }, 'Return JSON.');
+  assert.equal(bodies.length, 2);
+  for (const body of bodies) assert.equal('temperature' in body, false);
+});
+
+test('manual temperature wins on both primary and retry', async () => {
+  assert.deepEqual(
+    await collectTemperaturesThroughJsonRetry({ temperatureMode: 'manual', temperature: 1 }),
+    [1, 1],
+  );
+  // manual 档无有效数字时回落上游逻辑，不发残缺值
+  assert.deepEqual(
+    await collectTemperaturesThroughJsonRetry({ temperatureMode: 'manual' }),
+    [0.2, 0.1],
+  );
+});
+
+test('fresh settings default to legacy temperature mode without a stored temperature', () => {
+  const ctx = { chatId: 'temp-fresh', extensionSettings: { bs_biotracker: {} }, saveSettingsDebounced() {} };
+  globalThis.SillyTavern = { getContext: () => ctx };
+  // 新用户／未配过 → legacy＋null，走上游逻辑
+  const fresh = getSettings(ctx);
+  assert.equal(fresh.temperatureMode, 'legacy');
+  assert.equal(fresh.temperature, null);
+});
+
+test('manual 0.2 is fixed like any other value: [0.2, 0.2]', async () => {
+  // 手动档下 0.2 与其他值一视同仁：主请求与纠错重试都固定 0.2，预设不可覆盖
+  assert.deepEqual(
+    await collectTemperaturesThroughJsonRetry({ temperatureMode: 'manual', temperature: 0.2 }),
+    [0.2, 0.2],
+  );
+  assert.equal(resolveUserTemperature({ temperature: 0.2 }), 0.2);
+  assert.equal(resolveUserTemperature({ temperature: null }), null);
+  assert.equal(resolveUserTemperature({}), null);
+  assert.equal(resolveUserTemperature({ temperature: 1 }), 1);
+});
+
+// ---- 使用者终止 ----
+function installHangingHost(calls) {
+  installBrowserHost((url, options) => {
+    calls.push({ url, options });
+    return new Promise((_resolve, reject) => {
+      options.signal?.addEventListener('abort', () => {
+        const error = new Error('The operation was aborted.');
+        error.name = 'AbortError';
+        reject(error);
+      });
+    });
+  });
+}
+
+const hangingSettings = { apiUrl: 'https://relay.example.test/v1', apiKey: 'k', model: 'm', apiTimeoutMs: 0 };
+
+test('使用者终止：进行中的请求立刻中断、不重试，错误标记为使用者终止', async () => {
+  const calls = [];
+  installHangingHost(calls);
+  const pending = callOpenAICompatible(hangingSettings, { recent_messages: [] }, 'Return JSON.', { flow: 'diary' });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(getActiveApiRequests().map((request) => [request.flow, request.label]), [['diary', '日记']]);
+  assert.equal(abortActiveApiRequests({ flow: 'diary' }), 1);
+  await assert.rejects(pending, (error) => isApiUserAbortError(error) && !isApiDeadlineError(error) && /日记已由使用者终止/.test(error.message));
+  assert.equal(calls.length, 1, '终止后不再重试');
+  assert.deepEqual(getActiveApiRequests(), [], '结束后从进行中清单移除');
+});
+
+test('只终止指定流程：其他流程的请求照常进行', async () => {
+  const calls = [];
+  installHangingHost(calls);
+  const tracker = callOpenAICompatible(hangingSettings, { recent_messages: [] }, 'Return JSON.', { flow: 'tracker' });
+  const diary = callOpenAICompatible(hangingSettings, { recent_messages: [] }, 'Return JSON.', { flow: 'diary' });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(abortActiveApiRequests({ flow: 'tracker' }), 1);
+  await assert.rejects(tracker, (error) => isApiUserAbortError(error));
+  assert.deepEqual(getActiveApiRequests().map((request) => request.flow), ['diary'], '日记仍在进行');
+  assert.equal(abortActiveApiRequests(), 1, '不指定流程时全部终止');
+  await assert.rejects(diary, (error) => isApiUserAbortError(error));
 });

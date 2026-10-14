@@ -23,7 +23,7 @@ function makeCharacter(name, overrides = {}) {
       },
       bio: {},
       metabolism: { excretion: 20, hunger: 30, sleep: 10, milk: 5, odor: 10, companionship: 15 },
-      descriptions: { normalDescription: '外貌|黑发碧眼;;', pregnantDescription: '' },
+      descriptions: { normalDescription: [{ name: '外貌', value: '黑发碧眼', updatedAt: 0 }], pregnantDescription: [] },
       diary: [],
       notify: {},
       ...overrides.profile,
@@ -39,13 +39,13 @@ function makeContext() {
           wardrobe: {
             enabled: true,
             items: [
-              { id: 1, name: '白色连身裙', note: '及膝雪纺，方领。', slot: 'main', parts: ['连身裙'], masking: 6, support: 4, capacity: 3, convenience: 5 },
-              { id: 2, name: '衬衫牛仔裤', note: '白衬衫配直筒牛仔裤。', slot: 'main', parts: ['白衬衫', '牛仔裤'], masking: 7, support: 5, capacity: 4, convenience: 7 },
-              { id: 3, name: '蕾丝内衣', note: '浅色蕾丝，贴身。', slot: 'accessory', layer: 'inner', masking: 0, support: 2, capacity: 0, convenience: 0 },
-              { id: 4, name: '针织外套', note: '米色开衫。', slot: 'accessory', masking: 2, support: 0, capacity: 0, convenience: 0 },
+              { id: 1, name: '白色连身裙', note: '及膝雪纺，方领。', slot: 'main', parts: ['连身裙'], fitProfile: { masking: 'medium', support: 'normal', capacity: 'fitted', convenience: 'normal' } },
+              { id: 2, name: '衬衫牛仔裤', note: '白衬衫配直筒牛仔裤。', slot: 'main', parts: ['白衬衫', '牛仔裤'], fitProfile: { masking: 'high', support: 'normal', capacity: 'fitted', convenience: 'convenient' } },
+              { id: 3, name: '蕾丝内衣', note: '浅色蕾丝，贴身。', slot: 'accessory', category: 'underwear', effects: ['support_up'] },
+              { id: 4, name: '针织外套', note: '米色开衫。', slot: 'accessory', category: 'outerwear', effects: ['masking_up'] },
             ],
           },
-          outfit: { mainItemId: 1, accessoryItemIds: [3, 4], temporaryItems: [], wearState: '敞开', pregFit: null },
+          outfit: { mainItemId: 1, accessoryItemIds: [3, 4], transientItems: [], wearState: '敞开', pregFit: null },
         },
       }),
       贝拉: makeCharacter('贝拉', {
@@ -53,9 +53,9 @@ function makeContext() {
         profile: {
           wardrobe: {
             enabled: true,
-            items: [{ id: 1, name: '孕妇裙', note: '高腰伞形。', slot: 'main', masking: 6, support: 5, capacity: 8, convenience: 6 }],
+            items: [{ id: 1, name: '孕妇裙', note: '高腰伞形。', slot: 'main', fitProfile: { masking: 'medium', support: 'normal', capacity: 'stretch', convenience: 'normal' } }],
           },
-          outfit: { mainItemId: 1, accessoryItemIds: [], temporaryItems: [], wearState: '整齐', pregFit: null },
+          outfit: { mainItemId: 1, accessoryItemIds: [], transientItems: [], wearState: '整齐', pregFit: null },
         },
       }),
       幕外子: makeCharacter('幕外子', {
@@ -63,9 +63,9 @@ function makeContext() {
         profile: {
           wardrobe: {
             enabled: true,
-            items: [{ id: 1, name: '和服', note: '藏青碎花。', slot: 'main', masking: 8, support: 3, capacity: 5, convenience: 3 }],
+            items: [{ id: 1, name: '和服', note: '藏青碎花。', slot: 'main', fitProfile: { masking: 'high', support: 'normal', capacity: 'fitted', convenience: 'inconvenient' } }],
           },
-          outfit: { mainItemId: 1, accessoryItemIds: [], temporaryItems: [], wearState: '整齐', pregFit: null },
+          outfit: { mainItemId: 1, accessoryItemIds: [], transientItems: [], wearState: '整齐', pregFit: null },
         },
       }),
     },
@@ -123,21 +123,26 @@ test('tracker payload preserves host context text without regex or tag cleaning'
 
 test('tracker payload sends slim wardrobe outside the wear-fit window with parts/layer intact', () => {
   const ctx = makeContext();
-  const payload = buildTrackerPayload(ctx, state.getSettings(ctx));
+  const settings = state.getSettings(ctx);
+  settings.chatStates[CHAT_KEY].skillBaselinePrompt = '只追踪正格冒险技能。';
+  const payload = buildTrackerPayload(ctx, settings);
   assert.equal(payload.wardrobe_enabled, true);
+  assert.equal(payload.skill_baseline_prompt, '只追踪正格冒险技能。');
 
   const aila = payload.existing_state['艾拉'];
   const dress = aila.profile.wardrobe.items.find((item) => item.id === 1);
   assert.equal(dress.masking, undefined, 'non-pregnancy payload omits the four dimensions');
-  assert.equal(dress.note, '及膝雪纺，方领。', 'note is kept for narrative use');
-  assert.deepEqual(dress.parts, ['连身裙']);
+  assert.equal(dress.note, undefined, 'unworn catalog entries remain compact');
+  const currentDress = aila.profile.outfit.currentItems.find((item) => item.id === 1);
+  assert.equal(currentDress.note, '及膝雪纺，方领。', 'current item keeps narrative detail');
+  assert.deepEqual(currentDress.parts, ['连身裙']);
   const innerwear = aila.profile.wardrobe.items.find((item) => item.id === 3);
-  assert.equal(innerwear.layer, 'inner');
+  assert.equal(innerwear.category, 'underwear');
   assert.equal(aila.profile.outfit.wearState, '敞开');
   assert.equal(aila.profile.outfit.currentWearText, '白色连身裙（敞开） + 针织外套（内着：蕾丝内衣）');
 });
 
-test('tracker payload keeps four dimensions and pregFit inside the wear-fit window', () => {
+test('tracker payload keeps four dimensions only on current items inside the wear-fit window', () => {
   const ctx = makeContext();
   const settings = state.getSettings(ctx);
   // pregFit 是惰性刷新：由工具执行（bsPassedTime/bsChangeOutfit 等）触发，payload 只序列化。
@@ -145,7 +150,8 @@ test('tracker payload keeps four dimensions and pregFit inside the wear-fit wind
   const payload = buildTrackerPayload(ctx, settings);
   const bella = payload.existing_state['贝拉'];
   const dress = bella.profile.wardrobe.items.find((item) => item.id === 1);
-  assert.equal(dress.masking, 6, 'postpartum characters keep the four dimensions');
+  assert.equal(dress.masking, undefined, 'catalog stays slim even during postpartum');
+  assert.equal(bella.profile.outfit.currentItems.find((item) => item.id === 1)?.masking, 6, 'current item keeps derived dimensions');
   assert.equal(typeof bella.profile.outfit.pregFit?.pregWearPressure, 'number', 'postpartum pregFit is computed');
   assert.equal(bella.profile.outfit.pregFit.pregWearPressure > 0, true, 'postpartum pressure is non-zero early in recovery');
 });
@@ -166,9 +172,11 @@ test('tracker system prompt carries the wardrobe rules only when a wardrobe exis
   const payload = buildTrackerPayload(ctx, state.getSettings(ctx));
   const prompt = buildTrackerSystemPrompt(state.DEFAULT_SYSTEM_PROMPT, null, payload);
   assert.match(prompt, /\[wardrobe \/ outfit\]/);
-  assert.match(prompt, /换装触发规则/);
-  assert.match(prompt, /整齐\/凌乱\/敞开\/半褪\/撩起/, 'wearState vocabulary is included');
-  assert.match(prompt, /铸造新的组合主件/, 'lazy combination rule is included');
+  assert.match(prompt, /衣柜无需预先准备/);
+  assert.match(prompt, /mainItemId=null.*衣着未记录/);
+  assert.match(prompt, /scope=owned/, 'atomic lazy creation rule is included');
+  assert.match(prompt, /fitProfile/, 'semantic tier contract is included');
+  assert.doesNotMatch(prompt, /配件单项只能 -3 到 3/);
 
   const disabled = buildTrackerSystemPrompt(state.DEFAULT_SYSTEM_PROMPT, null, { ...payload, wardrobe_enabled: false });
   assert.doesNotMatch(disabled, /\[wardrobe \/ outfit\]/);
@@ -199,6 +207,29 @@ test('a simulated model response drives the full apply pipeline and refreshes th
   );
 });
 
+test('visualCue keeps only the latest event with a rising seq, survives later rounds and never enters the model payload', () => {
+  const ctx = makeContext();
+  const settings = state.getSettings(ctx);
+  const first = applyToolCallsResult(ctx, {
+    tool_calls: [{
+      name: 'bsImplantEmbryo',
+      arguments: { female: '艾拉', provider: '委托者', race: '人类', fathers: '父方', fatherRace: '人类', count: 1 },
+    }],
+  });
+  assert.equal(first.logs[0].applied, true, first.logs[0].message);
+  const profile = () => settings.chatStates[CHAT_KEY].characters['艾拉'].profile;
+  assert.deepEqual(profile().visualCue, { type: 'surrogacy', seq: 1 });
+  assert.equal(buildTrackerPayload(ctx, settings).existing_state['艾拉'].profile.visualCue, undefined);
+
+  applyToolCallsResult(ctx, { tool_calls: [] });
+  assert.deepEqual(profile().visualCue, { type: 'surrogacy', seq: 1 }, 'kept until the UI plays it');
+
+  state.setVisualCue(profile(), 'fertilization');
+  assert.deepEqual(profile().visualCue, { type: 'fertilization', seq: 2 }, 'a later event replaces it');
+  assert.equal(state.setVisualCue(profile(), 'unknown'), null);
+  assert.deepEqual(profile().visualCue, { type: 'fertilization', seq: 2 });
+});
+
 test('empty description patches are a no-op instead of wiping the field', () => {
   const ctx = makeContext();
   const settings = state.getSettings(ctx);
@@ -207,7 +238,7 @@ test('empty description patches are a no-op instead of wiping the field', () => 
   applyToolCallsResult(ctx, {
     tool_calls: [{ name: 'bsSetDescription', arguments: { female: '艾拉', options: { normalDescription: '' } } }],
   });
-  assert.equal(
+  assert.deepEqual(
     settings.chatStates[CHAT_KEY].characters['艾拉'].profile.descriptions.normalDescription,
     before,
     'an empty-string patch must not erase the stored description',
@@ -279,4 +310,97 @@ test('tracker prompt keeps residual sperm and competition weight separate with c
   assert.match(prompt, /竞争权重 conceptionCandidates\.competitionWeight：沈砚行=8\.5/);
   assert.match(prompt, /禁止互相改写/);
   assert.match(prompt, /已经出现在既有状态之前的性交\/射精，只是历史记录/);
+});
+
+test('着衣系统总开关：开启时即使全员衣着未记录也送衣柜工具；关闭时工具、说明与 wardrobe／outfit 全不送，模型硬叫也不执行', () => {
+  const ctx = makeContext();
+  const settings = state.getSettings(ctx);
+  for (const item of Object.values(settings.chatStates[CHAT_KEY].characters)) {
+    item.profile.wardrobe = { enabled: true, items: [] };
+    item.profile.outfit = { mainItemId: null, accessoryItemIds: [], transientItems: [], wearState: '整齐', pregFit: null };
+  }
+  const on = buildTrackerPayload(ctx, settings);
+  assert.equal(on.wardrobe_enabled, true);
+  assert.equal(on.available_tools.some((tool) => tool.name === 'bsChangeOutfit'), true);
+  // 删衣物要有明确触发情境，否则模型想不到用 bsRemoveWardrobeItem
+  assert.match(buildTrackerSystemPrompt(state.DEFAULT_SYSTEM_PROMPT, null, on), /衣柜也要跟着剧情减少.*撕毁报废.*只是脱下、换下、弄脏送洗不删/);
+  assert.match(on.available_tools.find((tool) => tool.name === 'bsRemoveWardrobeItem').description, /送人、卖掉、遗失/);
+  assert.equal('outfit' in on.existing_state['艾拉'].profile, true, '开启后未记录的角色也送，才能直接换装');
+
+  settings.wardrobeSystemEnabled = false;
+  settings.chatStates[CHAT_KEY].characters['贝拉'].profile.outfit.mainItemId = 0;
+  const off = buildTrackerPayload(ctx, settings);
+  assert.equal(off.wardrobe_enabled, false);
+  assert.equal(off.available_tools.some((tool) => ['bsChangeOutfit', 'bsAddWardrobeItem', 'bsRemoveWardrobeItem'].includes(tool.name)), false);
+  assert.doesNotMatch(buildTrackerSystemPrompt(state.DEFAULT_SYSTEM_PROMPT, null, off), /\[wardrobe \/ outfit\]/);
+  for (const item of Object.values(off.existing_state)) {
+    assert.equal('wardrobe' in item.profile, false);
+    assert.equal('outfit' in item.profile, false);
+  }
+
+  const { logs } = applyToolCallsResult(ctx, { tool_calls: [{ name: 'bsChangeOutfit', arguments: { female: '艾拉', mainItemId: 0 } }] });
+  assert.equal(logs[0].applied, false);
+  assert.match(logs[0].message, /着衣系统已在系统页关闭/);
+  assert.equal(settings.chatStates[CHAT_KEY].characters['艾拉'].profile.outfit.mainItemId, null);
+});
+
+test('技能系统总开关：关闭时技能工具、图鉴、基准、说明与角色／胎儿／孩子的技能天赋全不送，模型硬叫也不执行', () => {
+  const ctx = makeContext();
+  const settings = state.getSettings(ctx);
+  const chatState = settings.chatStates[CHAT_KEY];
+  chatState.skillCatalog = [{ id: 1, name: '剑术', description: '用剑战斗' }];
+  chatState.skillBaselinePrompt = '只追踪冒险技能';
+  const aila = chatState.characters['艾拉'];
+  aila.profile.skills = [{ skillId: 1, level: 2, exp: 0 }];
+  aila.profile.talents = [{ skillId: 1, level: 1, exp: 0 }];
+  aila.profile.children = [{ name: '小艾', talents: [{ skillId: 1, level: 1, exp: 0 }] }];
+
+  const on = buildTrackerPayload(ctx, settings);
+  assert.equal(on.skill_enabled, true);
+  assert.equal(on.skill_catalog.length, 1);
+  assert.equal(on.available_tools.some((tool) => tool.name === 'bsTrainSkill'), true);
+  const onPrompt = buildTrackerSystemPrompt(state.DEFAULT_SYSTEM_PROMPT, null, on);
+  assert.match(onPrompt, /\[skills \/ talents\]/);
+  assert.match(onPrompt, /本聊天技能基准/);
+
+  settings.skillSystemEnabled = false;
+  const off = buildTrackerPayload(ctx, settings);
+  assert.equal(off.skill_enabled, false);
+  assert.equal('skill_catalog' in off, false);
+  assert.equal('skill_baseline_prompt' in off, false);
+  assert.equal(off.available_tools.some((tool) => ['bsTrainSkill', 'bsRegisterSkillDefinition'].includes(tool.name)), false);
+  const offProfile = off.existing_state['艾拉'].profile;
+  assert.equal('skills' in offProfile, false);
+  assert.equal('talents' in offProfile, false);
+  assert.equal('talents' in offProfile.children[0], false);
+  const offPrompt = buildTrackerSystemPrompt(state.DEFAULT_SYSTEM_PROMPT, null, off);
+  assert.doesNotMatch(offPrompt, /\[skills \/ talents\]|skill_catalog|talents|本聊天技能基准/);
+  assert.match(offPrompt, /\[children\]/);
+
+  const { logs } = applyToolCallsResult(ctx, { tool_calls: [{ name: 'bsTrainSkill', arguments: { female: '艾拉', skill: '剑术', skillExp: 500 } }] });
+  assert.equal(logs[0].applied, false);
+  assert.match(logs[0].message, /技能系统已在系统页关闭/);
+  assert.deepEqual(aila.profile.skills, [{ skillId: 1, level: 2, exp: 0 }]);
+});
+
+test('状态视图省略空值与非妊娠期的孕态描述；outfit.mainItemId=null 保留', () => {
+  const ctx = makeContext();
+  const settings = state.getSettings(ctx);
+  const aila = settings.chatStates[CHAT_KEY].characters['艾拉'];
+  aila.profile.descriptions = { normalDescription: [{ name: '外貌', value: '黑发', updatedAt: 0 }], pregnantDescription: [{ name: '孕态', value: '隆起', updatedAt: 0 }] };
+  aila.profile.base.derivedType = null;
+  aila.profile.base.sperms = [];
+  aila.profile.outfit.mainItemId = null;
+  const sent = buildTrackerPayload(ctx, settings).existing_state['艾拉'].profile;
+  assert.deepEqual(sent.descriptions.normalDescription, { 外貌: '黑发' }, '模型看到的是 { 字段名: 内容 }，不带 updatedAt');
+  assert.equal('pregnantDescription' in sent.descriptions, false, '卵泡期不送孕态描述');
+  assert.equal('derivedType' in sent.base, false);
+  assert.equal('sperms' in sent.base, false);
+  assert.equal('children' in sent, false);
+  assert.equal(sent.outfit.mainItemId, null, '衣着未记录的 null 要保留');
+
+  aila.profile.base.stage = '孕中期';
+  aila.profile.pregnant = { pregnantDays: 140, effectivePregnantDays: 140, fetuses: [] };
+  const pregnant = buildTrackerPayload(ctx, settings).existing_state['艾拉'].profile;
+  assert.deepEqual(pregnant.descriptions.pregnantDescription, { 孕态: '隆起' });
 });

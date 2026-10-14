@@ -1,9 +1,9 @@
-import { PSY_MENS_FIELDS, PSY_PREG_FIELDS } from './registry_psy_config.js'
-import { buildEmbryoTypeLorePrompt } from './embryo_prompt_context.js'
-import { buildRaceCatalogBlock, buildRacePhysiologyPrompt } from './race_prompt_context.js'
-import { getDerivedTypeFluxProfile } from './race_config.js'
-import { deriveFetusTags, describeFetusTags } from './fetus_tags.js'
-import { LABOR_STAGES, PREGNANCY_STAGES } from './stage_config.js'
+import { PSY_MENS_FIELDS, PSY_PREG_FIELDS } from './registry_psy_config.js';
+import { buildEmbryoTypeLorePrompt } from './embryo_prompt_context.js';
+import { buildBodySizeToolNote, buildRaceCatalogBlock, buildRacePhysiologyPrompt, buildWorldBaselineBlock, isOwnMetabolismHidden } from './race_prompt_context.js';
+import { getDerivedTypeFluxProfile } from './race_config.js';
+import { deriveFetusTags, describeFetusTags } from './fetus_tags.js';
+import { LABOR_STAGES, MENSTRUAL_STAGES, PREGNANCY_STAGES } from './stage_config.js';
 
 /** 本轮 payload 里真的出现过的胎儿标签；没出现的标签不必浪费 token 去解释 */
 function collectRelevantFetusTags(payload = {}) {
@@ -29,13 +29,13 @@ function collectRelevantFluxNames(payload = {}) {
   }
   if (payload?.existing_state && typeof payload.existing_state === 'object') {
     for (const item of Object.values(payload.existing_state)) {
-      const profile = item?.profile || {}
-      const base = profile.base || {}
-      const pregnant = profile.pregnant || {}
-      pushFluxName(base.derivedType)
-      for (const sperm of Array.isArray(base.sperms) ? base.sperms : []) pushFluxName(sperm?.derivedType)
-      for (const fetus of Array.isArray(pregnant.fetuses) ? pregnant.fetuses : []) pushFluxName(fetus?.fatherDerivedType)
-      for (const child of Array.isArray(profile.children) ? profile.children : []) pushFluxName(child?.derivedType)
+      const profile = item?.profile || {};
+      const base = profile.base || {};
+      const pregnant = profile.pregnant || {};
+      if (!isOwnMetabolismHidden(profile)) pushFluxName(base.derivedType);
+      for (const sperm of (Array.isArray(base.sperms) ? base.sperms : [])) pushFluxName(sperm?.derivedType);
+      for (const fetus of (Array.isArray(pregnant.fetuses) ? pregnant.fetuses : [])) pushFluxName(fetus?.fatherDerivedType);
+      for (const child of (Array.isArray(profile.children) ? profile.children : [])) pushFluxName(child?.derivedType);
     }
   }
   return found
@@ -77,8 +77,9 @@ export const TRACKER_VARIABLE_GUIDE_PROMPT = [
   '- 每个角色结构为 name / initialized / profile。',
   '- profile 主要包含 base、pregnant、experience、psychology、skills、talents、children、metabolism、descriptions、diary、notify，必要时也会附带部分 bio 字段。',
   '- bio 与 immune 大多属于内部运行参数，tracker 默认不会完整发给你；但与剧情表达直接相关的少数 bio 字段可以发送。',
-  '- 若角色具有 immune.metabolism=true，则 metabolism 也不会发给你，因为该角色不受代谢累积影响。',
+  '- 若角色带有 immune.metabolism=true，则 metabolism、pregnant.nutrition 与 blockage/acceleration/expansion 都不会发给你，本人的衍生需求说明也不发，因为该角色不受代谢累积影响；不要为她调用 bsExcreteMetabolism。',
   '- 若角色带有 offscreen=true，表示该角色当前不在场，existing_state 只提供精简状态，不代表角色不存在。',
+  '- 值为 null、空字串、空列表或空物件的字段一律省略，省略即代表「无」（例如没有 sperms、没有 children、derivedType 不存在）；outfit.mainItemId=null 表示衣着未记录；认知与心理的省略/null 表示未知，不等于未孕或 0。',
   '',
   '[base]',
   '- isHere: 是否在场。false 时角色仍会随时间推进，但幕外角色只发送少量状态给你。',
@@ -89,10 +90,13 @@ export const TRACKER_VARIABLE_GUIDE_PROMPT = [
   '- days: 当前阶段已经过了多少天，使用 0 起算的 elapsed/progress 语义；进入新阶段时为 0，超过该阶段上限后才切换下一阶段。',
   '- fertilizationDays: 受精后、着床前已经过的天数；着床等待期以 6 天为基础，并随角色实际月经周期长度等比缩放。',
   '- latestSexDays: 距最近一次性行为经过的天数；超过一个周期后通常会失效。',
+  '- penetrationState / penetrationSource 是当前可受孕生殖道的插入状态与来源；只按剧情事件用 bsAddSperm 更新，插入不等于射精。',
+  '- penetrationFit: 本次插入的体型契合（label、gap、text 与是否变化态、sizeBridge），由 bsAddSperm insert 结算，拔出后清除；只影响叙述，不限制交合与受孕。',
   '- age: 角色年龄，单位为年。',
+  '- bodySize: 角色常态（人态）的个体体型，1–7 级，人类为 4；缺省时按种族平均。变化态体型由系统按种族推算。',
   '- race: 当前保存的种族字符串，可能带子类或混血，不再带 [derived] 前缀。',
   '- derivedType: 衍生类型字符串，如 不死-僵尸；没有则为 null。',
-  '- sperms: 体内残留精液来源列表。残留每天自动衰减 10、归零即消失，通常 1-3 天内自然清空；不需要每轮重复描写流出。',
+  '- sperms: 体内残留精液来源列表。残留每天自动衰减 10、归零即消失，通常 1-3 天内自然清空；当下总有效量越高，本次受孕越容易，胜出来源的有效量也会提高高产物种的伴生卵数量。受精成功本身不会扣除或清空残留，不需要每轮重复描写流出。',
   '- sperms[*].male: 精液来源对象名称。',
   '- sperms[*].race: 该来源的父方种族字符串，已去除 [derived] 前缀；只描述当前残留精液。',
   '- sperms[*].derivedType: 该来源的父方衍生类型；没有则为 null。',
@@ -105,9 +109,10 @@ export const TRACKER_VARIABLE_GUIDE_PROMPT = [
   '- conceptionCandidates[*].race: 建立该竞争记录时保存的父方种族快照，已去除 [derived] 前缀；后续即使 sperms 中该来源被清洗、衰减或挤出，该快照仍保持本周期记录。',
   '- conceptionCandidates[*].derivedType: 建立该竞争记录时保存的父方衍生类型快照；没有则为 null。',
   '- conceptionCandidates[*].competitionWeight: 本周期该父源的自然受精竞争权重。有效 bsAddSperm 会根据本次 amount 建立或增加该父源的 competitionWeight；同一男性在本周期再次有效射入时，会继续累加自己的竞争权重。competitionWeight 属于“本周期父源竞争系统”，不会随着 sperms[*].value 的生命周期衰减、洗澡、清洗、排精、月经或精液挤出而减少。',
+  '- sperms[*].bodySize: 该来源的个体体型，只在已注册或 insert 时给过 maleBodySize 才有；受孕时存进胎儿的 fatherBodySize。',
   '- eggs: 当前可受精卵子数。',
-  '- libido: 性欲。',
-  '- uterinePressure: 宫压，越高越接近妊娠风险或分娩。',
+  '- libido: 性欲。角色在剧情中达到高潮时，用 bsUpdateCharacterStatus 传 options.orgasm=true（同一段性事只传一次），由系统结算高潮排卵并让性欲归零；事后的满足不要用减少 libido 代替。',
+  '- uterinePressure: 宫压，越高越接近妊娠风险或分娩。临产期或逾期时，剧情出现规律宫缩、见红等分娩发动的迹象，用 bsUpdateCharacterStatus 把 uterinePressure 加到接近上限（可直接给 +150，系统会夹在上限内），系统当下进入产兆前驱（约 48 小时后进入第一产程）；剧情明确写到已经规律宫缩、产程走得比这快时，用 bsAssistFetalPosition（action=descend）推送领头胎儿，每次缩短约 24 小时；孕早期、孕中期不要这样做，宫压过高在那时是流产风险。',
   '- vitality: 活力。',
   '- psyStress: 情压/精神压力。',
   '- vitalityLevel / psyStressLevel: 个体等级，决定对应数值上限与体质倾向。',
@@ -117,36 +122,41 @@ export const TRACKER_VARIABLE_GUIDE_PROMPT = [
   '- pregnant 只会在已有 fetuses、妊娠阶段、产兆前驱/产程、产后恢复或假孕期发送；幕外角色发送时只保留少量 pregnant 摘要，并用 fetusesCount 表示胎儿数量。',
   '- pregnantDays: 这次妊娠的孕龄天数，等同产科从末次月经/本族等价周期起点计算的孕周天数。',
   '- effectivePregnantDays: 真正计入胎儿发育与阶段推进的有效孕龄天数；当妊娠被冻结时，它可以停在原地而 pregnantDays 继续增加。',
-  '- laborHours / effectiveLaborHours / laborPhase / laborFetusIndex / laborPain 仅在产兆前驱或正式产程期间发送；产后恢复不再表示分娩疼痛。',
+  '- laborHours / effectiveLaborHours / laborPhase / laborBirthNumber / laborPain 仅在产兆前驱或正式产程期间发送；产后恢复不再表示分娩疼痛。',
+  '- 延产期：逾期后以特殊手段（bsExtendPregnancy）让妊娠拖着不生的妊娠阶段。extensionCount 是本次妊娠已延产几次，extensionUntilDays 是这次延产到期的有效孕日（到期会进入产兆前驱）。延产期间宫压不会自行累积，再高也不会引发流产或产程；羊膜每天回复、不会破水；不能剖腹或终止妊娠，唯一出口是 bsExtendPregnancy（action=induce）引产。',
+  '- base.uterineAtony：子宫乏力级数，第二次延产起每延一次加 1，产后恢复结束才清零。每级让宫压与性欲上限下降 10%、第一／第二产程变慢 10%、产后恢复变长 10%；剧情可描写宫缩无力、子宫松弛。',
   '- laborHours: 当前产程内部阶段已消耗的实际时长。',
   '- effectiveLaborHours: 真正推动当前产程内部阶段前进的有效时长。',
   '- laborPhase: 当前产程内部阶段。第一产程为潜伏期/活跃期/过渡期；第二产程为胎体下降/胎体娩出/间歇期；第三产程为供养器官娩出/产后观察。',
-  '- laborFetusIndex: 第二产程当前处理的胎次，从 1 起算；其他阶段通常为 0。',
+  '- laborBirthNumber: 第二产程正在生第几胎，从 1 起算；其他阶段通常为 0。它是出生计数，不是 fetuses 的下标。正在下降或娩出的那一胎在 fetuses 里带 presenting=true；fetuses 的排列顺序不代表出生顺序。',
   '- laborPain: 当前分娩疼痛程度，范围 0-10。描写疼痛反应不得明显超过此等级；刚进入第一产程时不应写成已达到极限痛苦。',
-  '- amnionDurability: 母体层的膜耐性；过低代表接近或已经破水。',
-  '- nutrition: 妊娠供养力盈余/赤字。正值代表供养充足，负值代表供养亏空；每周会参与胎儿体重结算。',
-  '- symptomReliefPending: 尚待透过母体安抚胎儿处理的妊娠不适次数；direction=maternal 的普通母胎互动成功时可消耗一次，其随机 affinity 结果为轻微变化时补回 1 点供养力，显著变化时补回 2 点供养力。',
-  '- bsMaternalFetalInteraction 的 direction=fetal 表示胎儿对母体的亲近或排斥，须传 change 来改变 affinity，且不会补充供养力；direction=maternal 表示母体安抚胎儿，不传 change，系统会随机决定 affinity 变化，成功时也可依变化强度回补待安抚供养力，产兆前驱时用于分娩抵抗。每名角色每个新小时仅能成功生效一次。',
-  '- blockage: 当日妊娠阻塞状态，格式为 {key, severity}。key 可为 excretion/hunger/sleep/milk/odor/companionship/fluxPositive/fluxNegative；它会让对应需求的 bsExcreteMetabolism 排解不顺畅。',
-  '- acceleration: 当日妊娠快积状态，格式同 blockage；它会让对应需求更快累积。',
-  '- expansion: 当日妊娠扩容状态，格式同 blockage；它会将对应普通需求上限从 150 扩为 200，或将对应方向的 flux 上限从 ±150 扩为 ±200。blockage、acceleration 与 expansion 不会同时落在同一项需求上。非衍生角色不会出现 fluxPositive/fluxNegative；衍生角色不会出现其 derivedType 已抵免的普通需求。',
+  '- amnionDurability: 羊膜耐性（0-100）；过低代表接近或已经破水。每一胎有各自的羊膜（同卵共用一个胎囊）：全部胎囊相同时只给这一个数值；不同时不给这个数值，改在对应胎儿上标 fetuses[*].amnion＝膜薄／膜危／已破，没标的就是完整。',
+  '- nutrition: 妊娠供养力盈余/赤字，由需求照料累积：任一需求在「高」时用 bsExcreteMetabolism 彻底处理到「无」约 +1，只处理一半不算；拖到「爆」约 -1，停在爆每满 24 小时再扣一次；「满」不增不减。点数会按种族与妊娠负担折算，所以常见小数。正值代表供养充足，负值代表供养亏空。这是全部胎儿的合计：系统每次计分当下就按各胎孕龄与位置拆给每一胎，每周各自换算成胎重后归零。',
+  '- 胎位操作、胎儿自主活动、母胎互动与插入推顶的规则写在各工具说明里（bsAssistFetalPosition、bsMaternalFetalInteraction、bsAddSperm），依工具回传描写。',
+  '- blockage / acceleration / expansion: 当日妊娠症状，格式为 {key, severity}，含义见 [metabolism]。',
   '- fetuses: 胎儿列表。',
   '- fetuses[*].fathers: 父方对象名称。',
-  '- fetuses[*].provider: 胚胎真正的归属方（代孕委托者、虫母等），自然受孕为 null。单一 provider 的孩子分娩后自动转交；多母源嵌合体以 × 显示并留在孕母名下。要建立外源受精卵请用 bsImplantEmbryo，不要自行编造。',
+  '- fetuses[*].provider: 胚胎真正的归属方（代孕委托者、虫母等），自然受孕为 null。单一 provider 的孩子分娩后自动转交；多母源嵌合体以 × 显示并留在孕母名下。',
   '- fetuses[*].providerSources: 可接收孩子的母源名单。多于一位时孩子默认登记在孕母名下，之后可手动转移给其中一位。',
   '- fetuses[*].chimera: 受精卵早期融合的嵌合资料，包含来源数量、父源、母源与融合前性别。没有融合时不出现。',
   '- fetuses[*].tags: 系统标注的胎儿来历标签（如 chimera/surrogacy/identical），由系统推导或在事件发生当下写入，只读，不要自行增删。本轮出现过的标签会在下方另行说明。',
   '- fetuses[*].identicalGroup: 同卵分裂的组别编号；带同一编号且 tags 含 identical 的胎儿由同一颗受精卵分裂而来。没有分裂时不出现。',
   '- fetuses[*].nestedInEmbryoId: 孕中孕专用——这一胎套在体内哪一颗胎儿之中（指向该胎的内部编号）。它的母亲是那颗胎儿，父亲照常是精源；出生后两个孩子一起娩出，被套的那个的母亲就是同胎的另一个孩子。孕中孕藏得比一般异期胎更久，要到孕晚期才会出现在 fetuses 里。',
-  '- fetuses[*].conceivedAtDays: 异期复孕专用——这一胎受精当下的 effectivePregnantDays。该胎自己的孕龄 = effectivePregnantDays 减去这个值，所以同腹胎儿的发育进度可能不同。一般妊娠不出现。',
+  '- fetuses[*].conceivedAtDays: 异期复孕专用——这一胎受精或植入当下的 effectivePregnantDays。该胎自己的孕龄 = effectivePregnantDays 减去这个值，所以同腹胎儿的发育进度可能不同。一般妊娠不出现。',
   '- 异期复孕的胎儿在进入孕中期之前不会出现在 fetuses 里，也不计入 fetusesCount：角色本人还不知道自己怀了两胎。它在系统里照常发育、照常消耗供养力，所以在揭晓前你会看到供养负担与体感比胎数应有的更重——那是伏笔，可以据此写身体的异样，但不要直接写破「其实有两胎」。揭晓时系统会以 notify 告知。',
   '- fetuses[*].fatherRace: 父方种族字符串，已去除 [derived] 前缀，用于理解父源与 fatherDerivedType。',
+  '- base.bloodline / fetuses[*].bloodline: 各种族的血脉份额（0到1），合计1；比例由系统遗传计算，不能用字串去重后的种族数重新均分。bloodlineSource=estimated 表示旧资料缺少比例，属于推定。',
   '- fetuses[*].fatherDerivedType: 父方衍生类型；若没有则为 null。',
+  '- fetuses[*].fatherBodySize / children[*].fatherBodySize: 父方的个体体型（受孕当下精液纪录所载）；没有则为未记录。',
   '- fetuses[*].gender: 胎儿性别。',
   '- fetuses[*].embryoType: 胚胎型态，如 胎生、卵生、卵胎生、胎转卵生、不定型。',
+  '- fetuses[*].companionEggCount: 这一胎伴随的背景卵数量（伴生卵），为 0 时不出现。出生时会随这一胎一起排出，可描写成产下整群卵，但只有这一胎会写入族谱；绝不能按伴生卵自行增加 fetusesCount、胎儿卡或孩子。',
   '- fetuses[*].weight: 胎重系数，標準1.0，范围0.33~3.0。影响妊娠负担、分娩难度与恢复期。',
-  '- fetuses[*].tendencyAngle: 胎位倾向角度，影响孕期/产兆前驱中的调位，以及第二产程胎体下降/娩出的难度；角度映射固定为 0/360=正常头位/正位，180=完全臀位/倒位，90或270=横位，禁止反写；不会阻止第一产程进入第二产程。若 notify 发出难产警示，应优先考虑 bsChildbirth 手术产。',
-  '- fetuses[*].tendencyAngleText: 系统额外附带的胎位文字说明，如 正位(头位)/倒位(臀位)/横位/斜位。',
+  '- fetuses[*].tendencyAngle: 胎位角度，0/360=头位，180=臀位，90或270=横位，禁止反写；影响第二产程的难度。若 notify 发出难产警示，应优先考虑 bsChildbirth 手术产。',
+  '- fetuses[*].tendencyAngleText: 系统额外附带的胎位文字说明，如 头位(头朝下)/臀位(臀部朝下)/横位/斜位。',
+  '- fetuses[*].positionText: 这一胎在子宫里的深度，由系统的胎动与产程自动结算：顶到宫顶／宫内自由／子宫低位／入盆／进入产道／着冠／先露部已出；卡住时会写明（如 与另一胎在入口互锁、肩部卡住、在宿主胎儿体内）。描写胎儿位置、腹部下沉、入盆时须与它一致，不要自行改写。',
+  '- fetuses[*].backSideText: 胎背朝母体哪一侧（左前／右前／左后／右后；横位时写成朝上或朝下、偏前或偏后）。与胎位角度互相独立，由系统的胎动与产程结算；胎背朝后（枕后位）时胎儿的脸朝母体腹侧，真实分娩模式下产程较慢、较痛。描写胎动方向、胎背贴着哪一侧肚皮时须与它一致。卵生、胎转卵生出生时是蛋，没有这一项，也没有枕后位。',
+  '- fetuses 的排列顺序是子宫里由左至右的相对位置，不代表出生顺序；正在下降或娩出的那一胎带 presenting=true。',
   '- fetuses[*].affinity: 母胎之間的親密度，也会参与 derivedType 进展。',
   '- fetuses[*].maternalDerivedTypeProgress: 与母体(正)/父源(負)衍生同化的进度，范围 -100 到 100。',
   '- fetuses[*].talents: 胎儿承接的天赋，只含 skillId、带正负号的 level 与 exp；只能由孕体角色的 bsTrainSkill 在允许阶段自动改变。',
@@ -159,7 +169,13 @@ export const TRACKER_VARIABLE_GUIDE_PROMPT = [
   '',
   '[experience]',
   '- 记录第一次对象、最近对象、情感/婚姻对象，以及怀孕、分娩、流产等经历次数。',
-  '- 这类字段偏长期记录，通常只在剧情明确成立时才需要更新。',
+  '- emotionalMates/marriageMates 为多人名单，由 date/breakup/marry/divorce 更新一人；婚姻和交往不连带增删。经验计数由后台结果更新，不能任意覆写。miscarriageExperience、abortionExperience 分别是流产与堕胎；旧版妊娠损失归入流产。',
+  '',
+  '[cognitionRecords]',
+  '- 每名角色独立的当前周期认知纪录；只有 bsRecordExperience(action=cognition) 追加，缺少纪录不等于相信未孕。允许猜错孕程、胎数与胎父；不改客观事实。实际进入月经才刷新，长期 experience 与 children 保留。',
+  '- 最新改口不删除旧笔；按先后与来源解读。系统受孕、胎父或工具成功不代表角色知情。未知身份不能用系统姓名补真相。',
+  '- hasCondom 与事后避孕在工具执行时结算，结果下一次回复承接，不预测或强制改写当轮正文；未结算的亲历结果不得预写。',
+  '- 自然妊娠线索只提示较容易注意身体变化，不自动确认怀孕。恢复期禁孕；恢复/假孕结束先进入月经刷新。',
   '',
   '[psychology]',
   '- psychology 分为 mens (常规/生理) 与 preg (妊娠相关) 两大组心理指数。',
@@ -168,8 +184,6 @@ export const TRACKER_VARIABLE_GUIDE_PROMPT = [
   '- 非怀孕时主要看 psychology.mens；怀孕、假孕、产兆前驱、产程时主要看 psychology.preg。',
   '- 心理阶段从 0 到 100+。若要调用 bsUpdatePsychology，数值参数表示变化量(delta)而不是目标值；例如当前 78 传 2 会变成 80，不是设为 2。建议尽量做小幅变化；单次以 ±1 到 ±3 为宜，±5 已属于大改。每名角色在每个新小时内仅允许一次成功心理变化，下一小时前不要重复调用。',
   '- 每个心理项由 *_value 和 *_interpret 组成。*_value 是 0-100 数值本体，*_interpret 是系统对应生成的心理解释。',
-  '- psychology.mens 另外包含 isChaste (是否当前保持贞洁)、hasContraception (是否有避孕措施) 两个事件旗标。',
-  '- psychology.preg 另外包含 knowsFatherSource (是否知晓父源)、hasProfessionalPrenatalCare (是否接受专业产检) 两个事件旗标。',
   '',
   '[skills / talents]',
   '- skills 是角色后天技能列表；每项为 {skillId, level, exp}。技能从 Lv1 觉醒，最高 Lv10，只进不退。',
@@ -180,17 +194,18 @@ export const TRACKER_VARIABLE_GUIDE_PROMPT = [
   '- skillExp 由你直接给非负整数，并综合事件成果、当前技能等级、本级需求及同名天赋判断。正天赋通常让同等事件更容易获得较多技能经验，负天赋通常较少；系统不会再次套倍率。',
   '- 严禁尝试传入 talentExp 或用任何工具修改角色自己的 talents。只有系统在允许孕期阶段执行技能锻炼时，才能依亲和度自动改变 fetuses[*].talents。',
   '- 新技能必须先调用 bsRegisterSkillDefinition，以 name+description 登记到 skill_catalog；先检查既有定义，禁止制造同义重复。随后才能用精确名称调用 bsTrainSkill，并在剧情确实触发觉醒时传 awaken=true。',
-  '- 孕中期、孕晚期、临产期、逾期、产兆前驱、第一产程调用 bsTrainSkill 时，系统每次只随机选择一胎，将本次 skillExp 依该胎 affinity 自动传为天赋经验：skillExp*abs(affinity)/50，正亲和为擅长、负亲和为苦手、0 不传。第二与第三产程禁止传递。',
+  '- 孕中期、孕晚期、临产期、逾期、延产期、产兆前驱、第一产程调用 bsTrainSkill 时，系统每次只随机选择一胎，将本次 skillExp 依该胎 affinity 自动传为天赋经验：skillExp*abs(affinity)/50，正亲和为擅长、负亲和为苦手、0 不传。第二与第三产程禁止传递。',
   '- 胎儿与孩子只有 talents，没有 skills。分娩时 talents 原样进入 children；日后注册孩子角色时，由用户在注册第五子页参考并载入，不会只凭同名自动继承。',
   '',
   '[children]',
   '- 已出生孩子列表。代孕／寄生所生的孩子会转交给 provider 指向的角色；该角色尚未注册时，孩子留在承载者名下并保留 children[*].provider 标记。',
   '- children[*].name: 孩子姓名。',
-  '- children[*].fathers: 父方对象名称。',
+  '- children[*].fathers: 实际遗传父方；selectedFather 为主动指定身份，可不同，不代表对方知情或认可。命名/选爹用 bsRecordExperience(action=child)，female 指当前持有者。',
   '- children[*].gender: 孩子性别。',
   '- children[*].race: 孩子种族。',
   '- children[*].derivedType: 孩子继承到的衍生类型；没有则为 null。',
   '- children[*].age: 孩子年龄，单位为年，会随时间推进。',
+  '- children[*].birthCompanionEggCount: 出生时一起排出的伴生卵数量，只是出生背景；这笔 children 记录仍只代表其中唯一成功长大繁衍的有效后代。',
   '- children[*].talents: 从胎儿阶段保留下来的天赋；注册该孩子时供用户在注册技能页参考载入。',
   '',
   '[diary]',
@@ -207,6 +222,7 @@ export const TRACKER_VARIABLE_GUIDE_PROMPT = [
   '- excretion 会在活力增加时累积；以 bsExcreteMetabolism 处理 hunger（进食）会增加部分泄意与少量困意，处理 sleep（睡眠）会增加少量饿意。milk 代表乳意：普通周期中为乳房胀敏或周期不适，黄体期/月经期会随时间累积，排卵期可因性欲波动少量累积；妊娠、假孕或产后恢复时则也涵盖乳胀与泌乳需求。odor 代表需要清理的臭意，companionship 代表渴望陪伴或社交的伴意。',
   '- 时间累积满一周时会进行日常生活结算：基本清洁会清除臭意，日常往来会缓解部分伴意；普通周期进入新一轮卵泡期时，周期型乳意会清零。妊娠、假孕或产后恢复的泌乳型乳意不会因跨周自动清除。',
   '- 只有剧情确实发生陪伴或社交时，才用 options.companionship 缓解伴意；臭意达到高等级时会降低陪伴缓解效果。伴意解除不额外转化为乳意；乳意仍由周期、妊娠/假孕/产后恢复与性欲波动等既有来源产生。',
+  '- pregnant.blockage／acceleration／expansion 是当日妊娠症状，格式为 {key, severity}，key 可为上述需求或 fluxPositive/fluxNegative；三者不会同时落在同一项需求上。',
   '- pregnant.blockage 表示阻塞症状，会降低对应需求的解除效果：',
   '  - excretion: 便秘。',
   '  - hunger: 孕吐恶心、消化不良。',
@@ -232,28 +248,26 @@ export const TRACKER_VARIABLE_GUIDE_PROMPT = [
   '- 对 derivedType 角色来说，被衍生代谢抵免的需求不会出现在 metabolism 中；未出现的需求不要主动提醒或要求处理。',
   '',
   '[wardrobe / outfit]',
-  '- wardrobe 是角色衣柜，包含 items；outfit 是当前穿着。主流敘事通常只需要关注在场角色的 outfit。',
-  '- 衣物 item 字段：id/name/note/slot/masking/support/capacity/convenience。id 使用整数；默认主件 id=0 表示全裸，不要加入 wardrobe.items。note 只写衣物稳定外观与来源：颜色、材质、版型、长短、固定开口、图案、制服/病服/借装来源等；皮肤暴露、开衩、透肤、深领等稳定外观写在 note。禁止写当前穿着反应、角色感受、近期身体变化、怀孕/胀痛/压胸/勒红/变紧/显怀等动态状态；这些由四维、pregFit 与当轮叙事推导。slot=main 为一次只能穿一件的完整基础套装：一般将上衣与下着合并为同一 main（连身裙、连体衣除外），不得拆成彼此互斥的 main，也不得把下着放入 accessory；四维按整套评分。main 可附 parts 数组列出组成部件名（如 ["白衬衫","牛仔裤"]）。slot=accessory 为可叠加的外套、鞋履、帽子、饰品、贴身内衣或功能配件补正；配件可附 layer（inner=贴身内衣等穿在主件之下，outer=外搭，默认 outer）。配件单项只能 -3 到 3，通常只影响 1-2 个最相关维度，其他维度填 0。',
-  '- 剧情中重新搭配上下装（如白衬衫改配短裙）时，不要修改原主件，应用 bsAddWardrobeItem 铸造新的组合主件（parts 列出部件）再用 bsChangeOutfit 换上；组合只需在实际穿过时创建。',
-  '- outfit.wearState 为当前穿着状态短标签（12 字内），默认 整齐。建议词表：整齐/凌乱/敞开/半褪/撩起/上衣已褪/下装已褪/湿透，也可按情境自造同粒度短标签；主件有 parts 时优先引用部件名消歧，如「毛衣已脱」「裙摆撩起」。剧情中穿着完整度或整洁度变化时，用 bsChangeOutfit 只传 wearState 即可更新；换主件时未显式传入会自动重置为整齐。仅着内衣可表达为 mainItemId: 0 加 inner 配件。',
-  '- 可独立穿脱的外层（毛衣、开衫、外套等）应是 layer=outer 的配件而不是 main 的一部分；若发现某主件把外层并入了 parts，可用 bsAddWardrobeItem 把外层拆成新配件并更新该主件。',
-  '- 四维含义：masking=掩盖身体曲线、孕肚、胸腹变化的程度，不等于皮肤裸露程度，露肤、开衩、透肤等稳定外观由 note 描述；support=对胸、腹、腰、重心的承托程度；capacity=容许体型变化的程度；convenience=行动、穿脱、如厕、哺乳或排解需求的方便程度。',
-  '- 可用 bsAddWardrobeItem 添加/更新长期衣柜衣物，bsRemoveWardrobeItem 删除长期衣柜衣物，bsChangeOutfit 更换当前主件和配件。穿上或脱下个别配件（穿鞋、戴外套、脱袜等）优先用增量参数：addAccessoryItemIds 穿上、removeAccessoryItemIds 脱下，在当前配件基础上生效，不需要重述其他配件。accessoryItemIds 是覆盖式完整列表，用于整套重设：脱掉所有配件传 accessoryItemIds: []；全裸传 mainItemId: 0 且 accessoryItemIds: []。wearState 只是状态标签，不会改变穿了哪些衣物。',
-  '- 临时衣物（如病服、借来的外套、旅馆睡衣）不要加入 wardrobe；在 bsChangeOutfit 传 temporaryItems，并让 mainItemId/accessoryItemIds 指向其中 id。换回衣柜服装时传 temporaryItems: [] 清除临时衣物。',
-  '- 衣物引用规则：调用衣柜工具时优先传整数 id；若不确定 id，可传准确的衣物名称字符串，系统会按名称解析。bsAddWardrobeItem 新增衣物可省略 id，系统会自动分配下一个整数 id，不要自造大数字 id。',
-  '- 换装触发规则：只要 recent_messages 中出现穿上、脱下、更衣、借穿、被脱除、淋湿、衣衫不整、洗浴后重新着装等衣着或穿着状态变化，就必须调用 bsChangeOutfit，使 outfit 与当前叙事一致：换主件传 mainItemId；穿脱个别配件传 addAccessoryItemIds/removeAccessoryItemIds；仅状态变化传 wearState。不要用 wearState 或描述文字代替配件穿脱。',
-  '- outfit.currentWearText 是系统解析出的当前穿着摘要（主件 + 穿着状态 + 配件与贴身衣物），仅供比对阅读，不要写回。每轮应将它与最近叙事对照：不符时必须同轮调用 bsChangeOutfit 修正。衣着的当前状态由 outfit 机械字段唯一承担，不要在 descriptions 中维护衣着子字段。',
-  '- 幕外(offscreen)角色也会附带精简 wardrobe.items（仅 id/name/slot/layer）与当前 outfit 摘要。角色重新登场时，若衣着应有变化（如换了日常服、外出服），应在调用 bsSetCharacterPresence 的同一轮用 bsChangeOutfit 完成回场换装。',
-  '- 四维数值只在孕期窗口（真实妊娠/产兆前驱/产程/产后恢复）发送并参与 pregFit 计算；窗口外 payload 中的衣物只有 id/name/slot/note/parts/layer，非孕期敘事请依 note 的稳定外观描述。四维仍保存在系统中，bsAddWardrobeItem 新增或更新衣物时仍必须给出完整四维。',
+  '- wardrobe.items 是长期衣柜；outfit 是当前穿着。衣柜无需预先准备。',
+  '- item 使用整数 id、name、note 与 slot。id=0 是明确全裸；outfit.mainItemId=null 才是衣着未记录，不得把未知推断为裸体。note 只写颜色、材质、版型、长短、固定开口、图案与来源等稳定外观，不写角色感受、怀孕反应或衣物当下状态。',
+  '- slot=main 是一次只能穿一套的完整基础衣着；上下装合为一件 main，parts 可列出组成部件。main.fitProfile 使用语意档位：masking=very_low/low/medium/high，support=none/normal/strong，capacity=tight/fitted/stretch/loose，convenience=inconvenient/normal/convenient。',
+  '- fitProfile 必须与衣物的 name、note 一致，逐项判断：宽松、宽大、孕妇装的 capacity 用 stretch 或 loose，修身、紧身、孕前旧衣用 fitted 或 tight；有托腹或承托设计的 support 用 strong。',
+  '- slot=accessory 是可独立穿脱的内衣、外搭、鞋袜、头饰、饰品或支撑用品。category=underwear/outerwear/footwear/headwear/ornament/support/other；effects 最多两项，使用 masking/support/capacity/convenience 加 _up 或 _down。',
+  '- masking 是掩盖身体曲线与孕肚变化，不等于露肤；support 是胸腹腰与重心承托；capacity 是容许体型变化；convenience 是行动、穿脱、如厕、哺乳或排解需求的方便程度。',
+  '- 新衣可直接用 bsChangeOutfit 的 main/accessories 建立并穿上：scope=owned 收入长期衣柜，scope=temporary 仅保留到该衣物脱下。bsAddWardrobeItem 只收藏或更新长期衣物，引用正在穿的临时衣物时会把它转为长期衣物（id 与穿着不变）；bsRemoveWardrobeItem 永久删除。衣物可用整数 id 或准确名称引用。',
+  '- 衣柜也要跟着剧情减少：衣物被撕毁报废、丢弃、送人、卖掉、遗失、被没收，或角色明确把穿不下的衣服收起、丢掉时，用 bsRemoveWardrobeItem 删除；只是脱下、换下、弄脏送洗不删。正在穿的衣物被毁时，同轮先用 bsChangeOutfit 换下（或换上别的），再删除。',
+  '- accessoryItemIds 覆盖当前配件整表；addAccessoryItemIds/removeAccessoryItemIds 用于增量穿脱。全裸传 mainItemId:0 与 accessoryItemIds:[]。wearState 只是 12 字内的状态标签，不会改变穿了哪些衣物；换主件而未传 wearState 时自动回到整齐。',
+  '- recent_messages 出现穿脱、更衣、借穿、被脱除、淋湿、衣衫不整或洗浴后着装时，调用 bsChangeOutfit 使 outfit 与叙事一致。outfit.currentWearText 与 currentItems 只供核对，不要写回，也不要在 descriptions 另建衣着状态。',
+  '- 幕外角色也会附精简衣柜名录与当前穿着摘要；重新登场时若衣着改变，应与 bsSetCharacterPresence 同轮换装。衣柜名录始终精简；当前衣物才附稳定外观，内部换算分数只在孕期窗口发送并参与 pregFit。',
   '- outfit.pregFit 只在真实妊娠、产兆前驱、产程或产后恢复中存在；其余阶段为 null。pregFit.pregWearPressure 为孕期衣着压力，产后恢复期间会随恢复进度从产后初期水平递减到 0；gap 为四维余裕：masking/support/capacity/convenience。gap 低于 0 表示该维度已被孕期变化压过。',
   '- gap 表示衣物该维度扣除孕期压力后的余裕。一般 gap 约 3 以上表示仍有余裕；0 到 2 表示开始吃紧；-1 到 -3 表示明显冲突；-4 以下表示该维度严重失效。按具体维度叙述：masking 失效是轮廓、孕肚或胸腹变化难藏；support 失效是承托不足、下坠、晃动或重心负担外溢；capacity 失效是版型固定、尺寸死、腰腹胸臀被迫撑紧或扣合困难；convenience 失效是行动、穿脱、如厕或排解需求明显受阻。不要把 gap 数值直接写进叙事，除非是调试说明。',
   '',
   '[descriptions]',
-  '- normalDescription / pregnantDescription 为文字描述栏位。',
-  '- 两者格式固定为：字段名|描述内容;;字段名|描述内容;;...字段名|描述内容;;',
-  '- 使用 bsSetDescription 前，必须逐一检查该描述栏位全部既有子字段；未传入的子字段会保留旧值，且仅代表它已检查并确认完全不变。不得为了简短而省略受本轮剧情、姿势、衣着、表情、身体状态或环境影响的字段。',
-  '- 不要新增角色原本没有的描述子字段；只能更新 existing_state 中该角色该 descriptions 已存在的字段名。唯一例外：当本提示词包含 [pregnantDescription 初始化] 段时，可为其中点名角色的空 pregnantDescription 建立规范内的首批子字段。',
-  '- 不要改写成自然段，不要省略字段名，不要把 ;; 或 | 换成别的分隔方式。',
+  '- normalDescription / pregnantDescription 为文字描述栏位；pregnantDescription 只在妊娠相关阶段（有胎儿、孕期、产兆前驱、产程、产后恢复、假孕期）发送，其余阶段不要更新它。',
+  '- 两者都是以字段名为键的物件 {"字段名":"描述内容"}，键的先后即字段顺序。',
+  '- staleDescriptionFields 列出超过一天（游戏时间）没更新的字段，按栏位分组；没有就不出现。',
+  '- 不要新增角色原本没有的描述字段；只能更新 existing_state 中该角色该 descriptions 已存在的字段名。唯一例外：当本提示词包含 [pregnantDescription 初始化] 段时，可为其中点名角色的空 pregnantDescription 建立规范内的首批字段。',
+  '- 描述内容不要换行，也不要把多个字段并成一段。',
   '',
   '[notify]',
   '- firstly: 主要阶段变化或必须优先处理的警示，例如真实产程中的难产手术产建议；也可能用于提醒角色获得或失去妊娠变速效果。',
@@ -270,19 +284,53 @@ const TRACKER_DIARY_SECTION = [
   '- 通常只有 bsPassedTime 跨日后才调用 bsWriteDiary，并优先写“昨日/前一日/上一天”的回顾。若剧情发生重大事件或 notify 提醒，也应写成事后补记的语气，不要像当下即时独白。',
   '- 角色不在场也可以写日记；可根据角色性格、处境与已知生活状态补足合理的日常幕外感受，但不要把未经剧情支持的重大事件写成既成事实，也不要用日记改写客观状态。',
   '',
-].join('\n')
+].join('\n');
+
+/** 写实世界不会出现这些字段：衍生类型、血统份额、伴生卵、flux */
+const REALISTIC_WORLD_DROPPED_LINES = [
+  '- derivedType:', '- sperms[*].derivedType:', '- base.bloodline / fetuses[*].bloodline:', '- fetuses[*].fatherDerivedType:',
+  '- fetuses[*].maternalDerivedTypeProgress:', '- fetuses[*].companionEggCount:', '- children[*].derivedType:',
+  '- children[*].birthCompanionEggCount:', '- 若角色具有 derivedType', '- fluxPositive / fluxNegative', '- 对 derivedType 角色来说',
+];
+/** 特殊工具关掉时，它产生的状态也不会出现 */
+const SPECIAL_TOOL_DROPPED_LINES = {
+  bsWombReturn: ['- 回归期：', '- 回归期不受', '- pregnant.wombReturn:'],
+  bsExtendPregnancy: ['- 延产期：', '- base.uterineAtony：'],
+  bsImplantEmbryo: ['- fetuses[*].provider:', '- fetuses[*].providerSources:'],
+};
+
+function dropGuideLines(guide, prefixes) {
+  if (prefixes.length === 0) return guide;
+  return guide.split('\n').filter((line) => !prefixes.some((prefix) => line.startsWith(prefix))).join('\n');
+}
+
 function buildTrackerMetabolismGuide(payload = null) {
-  const fluxNames = collectRelevantFluxNames(payload || {})
-  const diaryEnabled = payload?.diary_enabled !== false
-  const wardrobeEnabled = payload?.wardrobe_enabled === true
-  const breedingPsychologyEnabled = payload?.breeding_psychology_enabled === true
-  let baseGuide = diaryEnabled ? TRACKER_VARIABLE_GUIDE_PROMPT : TRACKER_VARIABLE_GUIDE_PROMPT.replace(`${TRACKER_DIARY_SECTION}\n`, '')
+  const fluxNames = collectRelevantFluxNames(payload || {});
+  const diaryEnabled = payload?.diary_enabled !== false;
+  const wardrobeEnabled = payload?.wardrobe_enabled === true;
+  const skillEnabled = payload?.skill_enabled !== false;
+  const breedingPsychologyEnabled = payload?.breeding_psychology_enabled === true;
+  let baseGuide = diaryEnabled
+    ? TRACKER_VARIABLE_GUIDE_PROMPT
+    : TRACKER_VARIABLE_GUIDE_PROMPT.replace(`${TRACKER_DIARY_SECTION}\n`, '');
   if (!wardrobeEnabled) {
     baseGuide = baseGuide.replace(/\n?\[wardrobe \/ outfit\][\s\S]*?\n\[descriptions\]/, '\n[descriptions]')
   }
   if (!breedingPsychologyEnabled) {
     baseGuide = baseGuide.replace('、psychology', '').replace(/\n?\[psychology\][\s\S]*?\n\[skills \/ talents\]/, '\n[skills / talents]')
   }
+  if (!skillEnabled) {
+    baseGuide = baseGuide
+      .replace(/\n- skill_catalog 是[^\n]*/, '')
+      .replace('、skills、talents', '')
+      .replace(/\n- fetuses\[\*\]\.talents:[^\n]*/, '')
+      .replace(/\n- children\[\*\]\.talents:[^\n]*/, '')
+      .replace(/\n?\[skills \/ talents\][\s\S]*?\n\[children\]/, '\n[children]');
+  }
+  baseGuide = dropGuideLines(baseGuide, [
+    ...(payload?.realistic_world === true ? REALISTIC_WORLD_DROPPED_LINES : []),
+    ...(Array.isArray(payload?.disabled_special_tools) ? payload.disabled_special_tools : []).flatMap((name) => SPECIAL_TOOL_DROPPED_LINES[name] || []),
+  ]);
   // 只解释本轮真的出现过的标签，与种族短叙述同规则：没用到就不占 token
   const fetusTagLines = describeFetusTags(collectRelevantFetusTags(payload || {}));
   if (fetusTagLines.length > 0) {
@@ -303,31 +351,66 @@ function collectPregnantDescriptionInitNames(payload = {}) {
   const existingState = payload?.existing_state
   if (!existingState || typeof existingState !== 'object') return names
   for (const [key, item] of Object.entries(existingState)) {
-    if (item?.offscreen === true) continue
-    const stage = String(item?.profile?.base?.stage || '')
-    if (!PREGNANT_DESCRIPTION_STAGES.has(stage)) continue
-    if (String(item?.profile?.descriptions?.pregnantDescription || '').trim()) continue
-    names.push(String(item?.name || key))
+    if (item?.offscreen === true) continue;
+    const stage = String(item?.profile?.base?.stage || '');
+    if (!PREGNANT_DESCRIPTION_STAGES.has(stage)) continue;
+    const pregnantDescription = item?.profile?.descriptions?.pregnantDescription;
+    if (typeof pregnantDescription === 'string' ? pregnantDescription.trim() : Object.keys(pregnantDescription || {}).length > 0) continue;
+    names.push(String(item?.name || key));
   }
   return names
 }
+/** 在场角色超过一天没更新的描述字段，一人一行 */
+function collectStaleDescriptionLines(payload = {}) {
+  const existingState = payload?.existing_state;
+  if (!existingState || typeof existingState !== 'object') return [];
+  const lines = [];
+  for (const [key, item] of Object.entries(existingState)) {
+    if (item?.offscreen === true) continue;
+    const stale = item?.profile?.staleDescriptionFields;
+    if (!stale || typeof stale !== 'object') continue;
+    const groups = Object.entries(stale)
+      .filter(([, names]) => Array.isArray(names) && names.length > 0)
+      .map(([field, names]) => `${field}：${names.join('、')}`);
+    if (groups.length > 0) lines.push(`- ${String(item?.name || key)} ${groups.join('；')}`);
+  }
+  return lines;
+}
+
 export function buildTrackerSystemPrompt(basePrompt = '', descriptionGuides = null, payload = null) {
-  const diaryEnabled = payload?.diary_enabled !== false
-  const metabolismGuide = buildTrackerMetabolismGuide(payload)
+  const diaryEnabled = payload?.diary_enabled !== false;
+  const metabolismGuide = buildTrackerMetabolismGuide(payload);
+  const skillBaselinePrompt = payload?.skill_enabled === false ? '' : String(payload?.skill_baseline_prompt || '').trim();
   const parts = [
+    [
+      '[只结算新讯息]',
+      '- recent_messages 里带 already_settled=true 的讯息，已在先前的追踪中结算过（时间、技能经验、生殖操作、衣着、关系、认知、日记等），只用来理解前情，不得再依据它们调用任何工具。',
+      '- 只为没有 already_settled 标记的新讯息结算；新讯息没有写到的事，即使旧讯息里有，也不要再处理一次。',
+    ].join('\n'),
     [
       '[bsPassedTime 强制规则]',
       '- bsPassedTime 是每一轮 tracker 分析都必须优先考虑的第一工具。',
-      '- 你应先根据 recent_messages 判断本轮累计了多少分钟/小时/天，再调用 bsPassedTime 推进时间。',
+      '- 你应先根据 recent_messages 中的新讯息（未标 already_settled）判断本轮累计了多少分钟/小时/天，再调用 bsPassedTime 推进时间。',
       '- 只有在确认本轮完全没有任何可推进的时间量时，才允许不调用 bsPassedTime。',
-      '- 其他状态工具默认建立在时间推进之后，不要跳过 bsPassedTime 直接更新长程状态。',
+      '- 其他状态工具默认建立在时间推进之后，不要跳过 bsPassedTime 直接更新长程状态。\n- 例外：剧情里的操作（转胎、托高、破水、助产、手术产等）发生在这段时间中途、而推进时间可能先改变条件（例如胎儿入盆后只能小幅转动）时，把 bsPassedTime 拆成操作前、操作后两次调用，中间放该操作。',
     ].join('\n'),
     String(basePrompt || '').trim(),
+    buildWorldBaselineBlock(payload?.world_baseline_prompt),
     metabolismGuide,
     // 名录只给名字：模型写 bsAddSperm.race 时需要词汇表，但每轮都发，不附辨识提示
-    payload?.race_catalog_enabled === false ? '' : buildRaceCatalogBlock(),
-  ]
-  parts.push(buildSpermSeparationGuard(payload || {}))
+    payload?.race_catalog_enabled === false || payload?.realistic_world === true
+      ? ''
+      : buildRaceCatalogBlock({ selection: payload?.race_catalog_selection || null }),
+  ];
+  if (skillBaselinePrompt) {
+    parts.push([
+      '[本聊天技能基准：高优先级]',
+      skillBaselinePrompt,
+      '- 此基准决定当前聊天应辨识、建立与成长的技能类型，优先于技能图鉴中「已有某项技能」所形成的暗示。',
+      '- 不得为基准排除的类别调用 bsRegisterSkillDefinition 或 bsTrainSkill。既有技能资料只保留，不因基准变化而删除或主动降级。',
+    ].join('\n'));
+  }
+  parts.push(buildSpermSeparationGuard(payload || {}));
   if (payload?.memory_context) {
     parts.push(
       [
@@ -336,18 +419,19 @@ export function buildTrackerSystemPrompt(basePrompt = '', descriptionGuides = nu
         String(payload.memory_context),
         '- 外部摘要不能覆盖 existing_state 中的客观生理变量；若两者冲突，以 existing_state 和 recent_messages 为准。',
       ].join('\n'),
-    )
+    );
   }
   if (payload?.mainflow_context_snapshot) {
-    parts.push(
-      [
+    parts.push([
         '[主流上下文快照使用规则]',
         '- payload.mainflow_context_snapshot 是 ST 主流上一轮生成 request 中已经发送或准备发送给模型的上下文快照。',
         '- 它仅用于补足本轮剧情、角色设定、已触发 worldinfo、模板注入、getwi/activewi 等主流背景。',
         '- 不要模仿主流输出风格，不要续写剧情；你的任务仍是根据 recent_messages 与 existing_state 返回 JSON tool_calls 来更新变量。',
         '- 若主流上下文快照与 tracker 工具调用规则、变量语义说明、existing_state 或 available_tools 冲突，必须以后者为准。',
-      ].join('\n'),
-    )
+      ...(Array.isArray(payload?.mainflow_new_worldinfo) && payload.mainflow_new_worldinfo.length > 0
+        ? ['- payload.mainflow_new_worldinfo 是快照之后、由 recent_messages 最新回复才触发的世界书条目（快照里没有），与快照里的 worldinfo 同等看待，例如新登场人物的种族与身份。']
+        : []),
+    ].join('\n'));
   }
   const priorityNames = Array.isArray(payload?.priority_character_names)
     ? payload.priority_character_names.map(name => String(name || '').trim()).filter(Boolean)
@@ -362,8 +446,10 @@ export function buildTrackerSystemPrompt(basePrompt = '', descriptionGuides = nu
       ].join('\n'),
     )
   }
-  const embryoTypeLorePrompt = buildEmbryoTypeLorePrompt(payload || {})
-  if (embryoTypeLorePrompt) parts.push(embryoTypeLorePrompt)
+  const embryoTypeLorePrompt = payload?.realistic_world === true ? '' : buildEmbryoTypeLorePrompt(payload || {});
+  if (embryoTypeLorePrompt) parts.push(embryoTypeLorePrompt);
+  // 写实世界全是人类，没有依个体的物种；对方特别高大或矮小时仍可依工具说明传 maleBodySize
+  if (payload?.realistic_world !== true) parts.push(buildBodySizeToolNote({ selection: payload?.race_catalog_selection || null }));
   if (!diaryEnabled) {
     parts.push('[diary]\n- diary 系统当前已关闭（settings.diaryRecentLimit = 0）。本轮不要参考 diary，也不要调用 bsWriteDiary。')
   }
@@ -371,16 +457,29 @@ export function buildTrackerSystemPrompt(basePrompt = '', descriptionGuides = nu
     payload?.require_full_description_updates === true
       ? [
           '[descriptions 完整更新模式：强制提示约束]',
-          '- 只要调用 bsSetDescription 更新 normalDescription 或 pregnantDescription，其对应字符串必须带回该角色该栏位所有既有子字段，不得只传部分字段。',
+          '- 只要调用 bsSetDescription 更新 normalDescription 或 pregnantDescription，其对应对象必须带回该角色该栏位所有既有子字段，不得只传部分字段。',
           '- 即使字段内容未改变，也必须原样带回；先完整检查，再按既有字段顺序输出。此规则优先于节省 token 的考虑。',
           '- 若因上下文缺失无法可靠填写某个字段，则不要调用该栏位的 bsSetDescription；不要编造内容或交出不完整更新。',
         ].join('\n')
       : [
-          '[descriptions 更新勤勉规则]',
+          '[descriptions 更新规则]',
+          '- 调用 bsSetDescription 时只传本轮受剧情、姿势、衣着、表情、身体状态或环境影响的字段，以及下方被点名待确认的字段；未传的字段保留原值。',
           '- 若调用 bsSetDescription，先逐字段检查；所有受本轮影响的既有字段必须一并更新。省略只允许用于已确认完全不变的字段。',
+          '- 不要为了简短而漏掉确实受影响的字段；因上下文不足而没把握的字段不要编造，留给下次。',
         ].join('\n'),
-  )
-  const trackedNames = Array.isArray(payload?.tracked_females) ? payload.tracked_females.map(name => String(name || '').trim()).filter(Boolean) : []
+  );
+  const staleDescriptionLines = collectStaleDescriptionLines(payload);
+  if (staleDescriptionLines.length > 0) {
+    parts.push([
+      '[descriptions 待确认]',
+      '- 以下字段超过一天（游戏时间）没有更新。请对照剧情检查：有变化就写新内容，确认没变就原样照抄（系统会记为已确认）。',
+      ...staleDescriptionLines,
+    ].join('\n'));
+  }
+
+  const trackedNames = Array.isArray(payload?.tracked_females)
+    ? payload.tracked_females.map((name) => String(name || '').trim()).filter(Boolean)
+    : [];
   if (trackedNames.length > 0) {
     parts.push(
       [
@@ -393,25 +492,61 @@ export function buildTrackerSystemPrompt(basePrompt = '', descriptionGuides = nu
   const pregnantInitNames = collectPregnantDescriptionInitNames(payload)
   const pregnantGuide = String(descriptionGuides?.pregnantDescription || '').trim()
   if (pregnantInitNames.length > 0 && pregnantGuide) {
-    parts.push(
-      [
-        '[pregnantDescription 初始化]',
-        `- 角色 ${pregnantInitNames.join('、')} 已进入妊娠相关阶段，但 pregnantDescription 仍为空。`,
-        '- 这是「不要新增描述子字段」规则的唯一例外：请尽快用 bsSetDescription 按下方规范为该角色建立首批 pregnantDescription 子字段，只建立规范中列出的字段名。',
-        '- 格式仍为：字段名|描述内容;;字段名|描述内容;;，不可用自然段，不可省略字段名。',
-        '',
-        '【pregnantDescription 规范】',
-        pregnantGuide,
-      ].join('\n'),
-    )
+    parts.push([
+      '[pregnantDescription 初始化]',
+      `- 角色 ${pregnantInitNames.join('、')} 已进入妊娠相关阶段，但 pregnantDescription 仍为空。`,
+      '- 这是「不要新增描述子字段」规则的唯一例外：请尽快用 bsSetDescription 按下方规范为该角色建立首批 pregnantDescription 子字段，只建立规范中列出的字段名。',
+      '- 格式为以字段名为键的物件 {"字段名":"描述内容"}，不可用自然段，不可省略字段名。',
+      '',
+      '【pregnantDescription 规范】',
+      pregnantGuide,
+    ].join('\n'));
   }
   return parts.filter(Boolean).join('\n\n')
 }
+/**
+ * 主流模型看得到状态 JSON 却没有 tracker 那份变量说明：这里只补它容易读错的数值与标记，
+ * 且只附本轮真的出现的部分（有妊娠才讲胎儿、有衣柜才讲穿着、有心理才讲心理）
+ */
+function buildMainFlowFieldNotes(existingState = {}) {
+  const profiles = Object.values(existingState || {}).map((item) => item?.profile || {});
+  const lines = [
+    '[状态字段速读]',
+    '- 值为空的字段一律省略；认知与心理的省略/null 表示未知，不等于未孕或0。',
+    '- cognitionRecords 保存角色信念，可以与事实不同；系统结果、真实胎父与胎数不自动成为角色知识。自然线索到点也不强制知孕。',
+    ...(profiles.some((profile) => profile.lastCondomResult || profile.lastEmergencyResult) ? ['- lastCondomResult/lastEmergencyResult 只在结算后的下一次叙事出现：是系统结果，不等于角色察觉；可据此描写合理可见的后果，不要求本轮处理。'] : []),
+    '- base：vitality 活力、psyStress 情压，体质与精神倾向看 *LevelText；libido 性欲；uterinePressure 宫压（上限随孕程提高，越高越接近流产或分娩）；eggs 可受精卵数；sperms 为体内残留精液，value 每天自然衰减；penetrationState 为 idle 未插入／inserted 插入中／spent 已射精。',
+  ];
+  if (profiles.some((profile) => profile.metabolism)) {
+    lines.push('- metabolism：excretion 泄意、hunger 饿意、sleep 困意、milk 乳意、odor 臭意、companionship 伴意，flux 为衍生种族的正负极需求；数值越高越急迫（一般上限 150）。需求高时可自然体现身体状态，何时处理由剧情决定，不要求每轮安排。');
+  }
+  if (profiles.some((profile) => profile.pregnant)) {
+    lines.push(
+      '- pregnant：pregnantDays 孕龄天数；laborPhase 产程内部阶段；laborPain 分娩疼痛 0-10，描写不得明显超过；nutrition 供养盈亏，正为充足、负为亏空；amnionDurability 或胎儿上的 amnion 表示羊膜，已破即破水。',
+      '- fetuses 按子宫里由左到右排列，不代表出生顺序；presenting=true 是正在下降或娩出的那一胎。weight 胎重系数，1.0 为标准；affinity 母胎亲密度 -50～50，负值为排斥；positionText、backSideText、tendencyAngleText 是胎位现况，描写须一致。',
+    );
+  }
+  if (profiles.some((profile) => profile.base?.stage === '延产期' || Number(profile.pregnant?.extensionCount) > 0)) {
+    lines.push('- 延产期：以特殊手段让逾期妊娠拖着不生；期间不会自然发动、不会破水，宫压再高也不会分娩。extensionCount 为已延产次数，extensionUntilDays 为这次延产到期的有效孕日。');
+  }
+  if (profiles.some((profile) => Number(profile.base?.uterineAtony) > 0)) {
+    lines.push('- base.uterineAtony 子宫乏力级数：反复延产让子宫松弛无力，宫缩弱、产程慢、产后恢复久。');
+  }
+  if (profiles.some((profile) => profile.outfit)) {
+    lines.push('- outfit.currentWearText 是当前穿着；mainItemId=null 表示衣着未记录，不代表裸体。pregFit.gap 低于 0 表示该维度（遮蔽、承托、容身、方便）已被孕期变化压过，只写成体感，不写数字。');
+  }
+  if (profiles.some((profile) => profile.psychology)) {
+    lines.push('- psychology 各项的 *_interpret 是心理解释，优先依它描写。');
+  }
+  lines.push('- notify 是本轮系统事件提示（阶段变化、风险、胎动等），可自然融入叙事，不要照抄。');
+  return lines.join('\n');
+}
+
 export function buildMainFlowStatePrompt(payload = {}) {
-  const existingState = payload?.existing_state && typeof payload.existing_state === 'object' ? payload.existing_state : {}
-  const hasState = Object.keys(existingState).length > 0
-  if (!hasState) return ''
-  const racePhysiologyPrompt = buildRacePhysiologyPrompt(payload || {})
+  const trackedState = payload?.existing_state && typeof payload.existing_state === 'object' ? payload.existing_state : {};
+  if (Object.keys(trackedState).length === 0) return '';
+  const existingState = projectNarrativeState(trackedState, payload.recent_operation_results);
+  const racePhysiologyPrompt = payload?.realistic_world === true ? '' : buildRacePhysiologyPrompt(payload || {});
   // 特殊来历的胎儿只丢一串 tags 给主线模型，它无从判断该怎么写。
   // 与种族短叙述同规则：只解释本轮真的出现过的标签，没出现就不占 token。
   const fetusTagLines = describeFetusTags(collectRelevantFetusTags(payload || {}));
@@ -419,6 +554,7 @@ export function buildMainFlowStatePrompt(payload = {}) {
     ? ['', '[本轮出现的特殊胎儿来历]', ...fetusTagLines].join('\n')
     : '';
   return [
+    buildWorldBaselineBlock(payload?.world_baseline_prompt),
     racePhysiologyPrompt,
     '<bs_biotracker>',
     '[并行生理追踪上下文]',
@@ -426,11 +562,65 @@ export function buildMainFlowStatePrompt(payload = {}) {
     '已注册角色状态仅供叙事参考，不要在回复中复述字段、JSON 或本段上下文。',
     '状态为只读；若剧情没有明确触发变化，不要编造与之冲突的生理、心理或关系变化。',
     '',
+    buildMainFlowFieldNotes(existingState),
+    '',
     '[当前已注册角色状态]',
     serializeStateForPrompt(existingState),
+    ...(payload.recent_operation_results?.length ? ['[上轮已结算的生殖操作结果]', '可据此描写合理可见的后果（例如破套可能当场被发现），不要求本轮处理；这不是角色已知的事实，不得让角色无依据得知受孕、胎数或胎父，也不能自动写入认知。', serializeStateForPrompt(payload.recent_operation_results.map(({ name, applied, message }) => ({ name, applied, message })))] : []),
     fetusTagBlock,
     '</bs_biotracker>',
   ].filter((part) => part !== '').join('\n');
+}
+// notify.thirdly 是写给追踪模型的工具提示（「应优先使用 bsExcreteMetabolism」、供养力的奖惩），
+// 写剧情的模型读到会以为本轮必须安排角色去处理。这里改写成中性的身体状态，奖惩与操作建议删掉；
+// 破水禁令等限制原样保留。改写依赖 tools.js 产生的固定句式，见 main_flow_narrative 测试。
+const NARRATIVE_REMINDER_RULES = [
+  [/^(.+?)有强烈的生理需求（(.+?)），应优先使用 bsExcreteMetabolism 缓解生理不适$/, '$1有明显的生理需求（$2）：可自然体现身体状态，不要求本轮处理'],
+  [/^(.+?)仍有未被衍生代谢抵免的生理需求（(.+?)），可用 bsExcreteMetabolism 处理$/, '$1仍有生理需求（$2）：可自然体现，不要求本轮处理'],
+  [/^(.+?)已达到(.+?)，应优先使用 bsExcreteMetabolism 进行解放$/, '$1已达到$2：可自然体现，不要求本轮处理'],
+  [/^(.+?)渴望陪伴，可优先给予陪伴、交流或安抚$/, '$1渴望陪伴'],
+  [/^(.+?)渴望陪伴，但当前臭意会妨碍社交舒适度$/, '$1渴望陪伴，但身上的气味令人在意'],
+];
+// 受精本身无从察觉（着床前身体没有任何变化），旁白读到「受精成功」会让角色提早出现孕兆、去验孕
+const NARRATIVE_REMINDER_DROPS = [/供养力/, /^若释放量足够大/, /^清洁后再给予陪伴/, /\bbs[A-Z]\w*/, /受精成功/, /再度受精/, /结出了新的受精卵/];
+
+/** 旁白不能调用工具：禁令留下，「须先调用某工具」这类句子或分句拿掉，仍带工具名的片段整段丢弃 */
+export function narrativeReminders(text) {
+  return String(text || '').split('；').map((part) => part.trim()).filter(Boolean).map((part) => {
+    const rule = NARRATIVE_REMINDER_RULES.find(([pattern]) => pattern.test(part));
+    if (rule) return part.replace(rule[0], rule[1]);
+    const stripped = part.replace(/。[^。]*\bbs[A-Z]\w*[^。]*/g, '').replace(/，[^，。]*\bbs[A-Z]\w*[^。]*/g, (clause, at, whole) => (whole.slice(0, at).includes('：') ? '' : clause));
+    return NARRATIVE_REMINDER_DROPS.some((pattern) => pattern.test(stripped)) ? '' : stripped;
+  }).filter(Boolean).join('；');
+}
+
+/**
+ * 主线叙事看到的角色状态：避孕结果只在刚结算后的下一次叙事出现（之后仍保存在资料里，
+ * 但不再每轮提醒），代谢提醒改成中性描述
+ */
+export function projectNarrativeState(existingState = {}, recentResults = []) {
+  const results = Array.isArray(recentResults) ? recentResults : [];
+  const fresh = (tool, test = () => true) => new Set(results.filter((item) => item?.name === tool && test(item)).map((item) => item.female));
+  const condomFresh = fresh('bsAddSperm', (item) => String(item.message || '').includes('deposit'));
+  const emergencyFresh = fresh('bsAbortion');
+  return Object.fromEntries(Object.entries(existingState || {}).map(([name, item]) => {
+    if (!item?.profile) return [name, item];
+    const profile = { ...item.profile };
+    // 点名过期字段是给追踪模型的，主线不需要
+    delete profile.staleDescriptionFields;
+    if (!condomFresh.has(name)) delete profile.lastCondomResult;
+    if (!emergencyFresh.has(name)) delete profile.lastEmergencyResult;
+    // 还在经期阶段就已经有胎儿，是受精卵尚未着床：旁白看不到，等着床进入孕早期才出现
+    if (profile.pregnant && MENSTRUAL_STAGES.includes(String(profile.base?.stage || ''))) delete profile.pregnant;
+    if (profile.notify) {
+      // 难产警示、阶段通知同样可能写着「可用某工具」，三栏一起改写
+      const notify = Object.fromEntries(Object.entries(profile.notify)
+        .map(([key, value]) => [key, typeof value === 'string' ? narrativeReminders(value) : value])
+        .filter(([, value]) => String(value || '').trim()));
+      profile.notify = Object.keys(notify).length > 0 ? notify : undefined;
+    }
+    return [name, { ...item, profile }];
+  }));
 }
 /**
  * 状态 JSON 注入防线：序列化后转义 `</` 与换行——角色卡/注册内容（描述、日记、

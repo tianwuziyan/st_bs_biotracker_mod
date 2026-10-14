@@ -35,12 +35,18 @@ function setup(names = ['艾拉']) {
   return chatState;
 }
 const call = (cs, name, args) => applyToolCall(cs, { name, arguments: args });
+const addSperm = (cs, args) => {
+  const safeArgs = { ejaculatedInside: true, protected: false, ...args };
+  const inserted = call(cs, 'bsAddSperm', { ...safeArgs, action: 'insert', amount: 0 });
+  if (!inserted.applied) return inserted;
+  return call(cs, 'bsAddSperm', { ...safeArgs, action: 'deposit' });
+};
 
 test('bsAddSperm 的 male 会解析 user 宏', () => {
   withUser('阿哲');
   const chatState = setup();
-  const result = call(chatState, 'bsAddSperm', {
-    female: '艾拉', male: '{{user}}', race: '人类', amount: 20, ejaculatedInside: true, protected: false,
+  const result = addSperm(chatState, {
+    female: '艾拉', male: '{{user}}', race: '人类', amount: 20,
   });
   assert.equal(result.applied, true, result.message);
   assert.equal(chatState.characters['艾拉'].profile.base.sperms[0].male, '阿哲');
@@ -57,7 +63,7 @@ test('四种写法都认得，大小写不敏感', () => {
   withUser('阿哲');
   for (const alias of ['user', 'USER', '{user}', '{{user}}', '<user>']) {
     const chatState = setup();
-    call(chatState, 'bsAddSperm', { female: '艾拉', male: alias, race: '人类', amount: 20, ejaculatedInside: true, protected: false });
+    addSperm(chatState, { female: '艾拉', male: alias, race: '人类', amount: 20 });
     assert.equal(
       chatState.characters['艾拉'].profile.base.sperms[0].male, '阿哲',
       `${alias} 应解析成 user 名`,
@@ -68,8 +74,8 @@ test('四种写法都认得，大小写不敏感', () => {
 test('female 也会解析：user 自己被注册成角色时找得到', () => {
   withUser('阿哲');
   const chatState = setup(['阿哲']);
-  const result = call(chatState, 'bsAddSperm', {
-    female: '{{user}}', male: '凯', race: '人类', amount: 20, ejaculatedInside: true, protected: false,
+  const result = addSperm(chatState, {
+    female: '{{user}}', male: '凯', race: '人类', amount: 20,
   });
   assert.equal(result.applied, true, result.message);
   assert.equal(chatState.characters['阿哲'].profile.base.sperms[0].male, '凯');
@@ -87,21 +93,21 @@ test('嵌合体的双父源逐个解析，按全角 × 拆', () => {
 test('名字里含拉丁 x 不会被切坏', () => {
   withUser('阿哲');
   const chatState = setup();
-  call(chatState, 'bsAddSperm', { female: '艾拉', male: 'Max', race: '人类', amount: 20, ejaculatedInside: true, protected: false });
+  addSperm(chatState, { female: '艾拉', male: 'Max', race: '人类', amount: 20 });
   assert.equal(chatState.characters['艾拉'].profile.base.sperms[0].male, 'Max');
 });
 
 test('一般名字原样保留', () => {
   withUser('阿哲');
   const chatState = setup();
-  call(chatState, 'bsAddSperm', { female: '艾拉', male: '凯', race: '人类', amount: 20, ejaculatedInside: true, protected: false });
+  addSperm(chatState, { female: '艾拉', male: '凯', race: '人类', amount: 20 });
   assert.equal(chatState.characters['艾拉'].profile.base.sperms[0].male, '凯');
 });
 
 test('拿不到宿主 context 时原样保留，不会变成空字串', () => {
   const chatState = setup();
-  const result = call(chatState, 'bsAddSperm', {
-    female: '艾拉', male: '{{user}}', race: '人类', amount: 20, ejaculatedInside: true, protected: false,
+  const result = addSperm(chatState, {
+    female: '艾拉', male: '{{user}}', race: '人类', amount: 20,
   });
   assert.equal(result.applied, true, result.message);
   assert.equal(chatState.characters['艾拉'].profile.base.sperms[0].male, '{{user}}');
@@ -110,6 +116,6 @@ test('拿不到宿主 context 时原样保留，不会变成空字串', () => {
 test('user 名为空白时也不覆写', () => {
   withUser('   ');
   const chatState = setup();
-  call(chatState, 'bsAddSperm', { female: '艾拉', male: '{{user}}', race: '人类', amount: 20, ejaculatedInside: true, protected: false });
+  addSperm(chatState, { female: '艾拉', male: '{{user}}', race: '人类', amount: 20 });
   assert.equal(chatState.characters['艾拉'].profile.base.sperms[0].male, '{{user}}');
 });

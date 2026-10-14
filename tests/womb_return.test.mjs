@@ -54,13 +54,13 @@ test('回归后进入回归期，多出一胎且胎重为上限', () => {
 });
 
 test('母为承载者、父为回归者，种族照常混血，并带 rebirth 标签', () => {
-  const chatState = setup({ base: { race: '精灵' } }, { base: { race: '龙族' } });
+  const chatState = setup({ base: { race: '精灵' } }, { base: { race: '西方龙' } });
   call(chatState, 'bsWombReturn', { female: '艾拉', returner: '琪拉', hours: 1 });
   const fetus = hostOf(chatState).pregnant.fetuses[0];
   assert.equal(fetus.fathers, '琪拉');
-  assert.equal(fetus.fatherRace, '龙族');
+  assert.equal(fetus.fatherRace, '西方龙');
   assert.match(fetus.race, /精灵/);
-  assert.match(fetus.race, /龙族/);
+  assert.match(fetus.race, /西方龙/);
   assert.deepEqual(deriveFetusTags(fetus, { carrierName: '艾拉' }), ['rebirth']);
 });
 
@@ -184,9 +184,9 @@ test('回归期的衣着压力顶到上限并随时间回落', () => {
     profile: {
       wardrobe: {
         enabled: true,
-        items: [{ id: 1, name: '连身裙', slot: 'main', masking: 6, support: 5, capacity: 5, convenience: 6 }],
+        items: [{ id: 1, name: '连身裙', note: '', slot: 'main', fitProfile: { masking: 'medium', support: 'normal', capacity: 'fitted', convenience: 'normal' } }],
       },
-      outfit: { mainItemId: 1, accessoryItemIds: [], temporaryItems: [], wearState: '整齐', pregFit: null },
+      outfit: { mainItemId: 1, accessoryItemIds: [], transientItems: [], wearState: '整齐', pregFit: null },
     },
   });
   call(chatState, 'bsWombReturn', { female: '艾拉', returner: '琪拉', hours: 24 });
@@ -337,7 +337,8 @@ test('回归期的心理更新走 preg 组', () => {
   // 写 mens 会被拒绝（阶段期待 preg）——写进 mens 的资料会在转入妊娠满 7 天时被清空
   const result = call(chatState, 'bsUpdatePsychology', { female: '艾拉', options: { mens: { stance: 2 } } });
   assert.equal(result.applied, false);
-  assert.match(result.message, /preg/);
+  assert.match(result.message, /单侧推演/);
+  assert.equal(hostOf(chatState).psychology.pendingSide, 'preg');
 });
 
 // ── 常态用法：user 被吞，或吞一个未注册的路人 ───────────────────
@@ -356,12 +357,12 @@ test('未注册的回归者可用 returnerRace 指定种族，含衍生类型', 
   const chatState = setup({ base: { race: '人类' } });
   delete chatState.characters['琪拉'];
   call(chatState, 'bsWombReturn', {
-    female: '艾拉', returner: '无名旅人', returnerRace: '[血族]龙族', hours: 1,
+    female: '艾拉', returner: '无名旅人', returnerRace: '[血族]西方龙', hours: 1,
   });
   const fetus = hostOf(chatState).pregnant.fetuses[0];
-  assert.equal(fetus.fatherRace, '龙族');
+  assert.equal(fetus.fatherRace, '西方龙');
   assert.equal(fetus.fatherDerivedType, '血族');
-  assert.match(fetus.race, /龙族/);
+  assert.match(fetus.race, /西方龙/);
 });
 
 test('未注册且没给种族时，视同与承载者同族', () => {
@@ -374,11 +375,11 @@ test('未注册且没给种族时，视同与承载者同族', () => {
 });
 
 test('returnerRace 优先于已注册角色自己的种族', () => {
-  const chatState = setup({ base: { race: '人类' } }, { base: { race: '龙族' } });
+  const chatState = setup({ base: { race: '人类' } }, { base: { race: '西方龙' } });
   call(chatState, 'bsWombReturn', {
     female: '艾拉', returner: '琪拉', returnerRace: '兽人', hours: 1,
   });
-  assert.equal(hostOf(chatState).pregnant.fetuses[0].fatherRace, '兽人');
+  assert.equal(hostOf(chatState).pregnant.fetuses[0].fatherRace, '欧克', '旧名兽人对应到欧克');
 });
 
 test('未注册的回归者没有冻结这回事，也没有天赋可继承', () => {

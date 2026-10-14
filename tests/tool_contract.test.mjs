@@ -47,6 +47,49 @@ test('bsSetCharacterPresence 的 isPresent：schema 与实作一致要求必填'
   assert.equal(call(one(), 'bsSetCharacterPresence', { female: 'A', isPresent: false }).applied, true);
 });
 
+test('bsImplantEmbryo.count 明确是胎儿卡数而非卵的枚数', () => {
+  const tool = toolOf('bsImplantEmbryo');
+  assert.match(tool.description, /count 只表示要建立几张胎儿卡/);
+  assert.match(tool.description, /十枚卵.*count=1/);
+  assert.match(tool.input_schema.properties.count.description, /有效后代候选数/);
+  assert.match(tool.input_schema.properties.count.description, /不是卵的枚数/);
+});
+
+test('bsAddSperm 以 insert / deposit / withdraw 驱动插入状态机', () => {
+  const fresh = state.createDefaultFemaleState('新角色');
+  assert.equal(fresh.profile.base.penetrationState, 'idle');
+  assert.equal(fresh.profile.base.penetrationSource, null);
+
+  const chatState = one();
+  const args = { female: 'A', male: 'B', race: '人类' };
+  const tool = toolOf('bsAddSperm');
+  assert.ok(tool.input_schema.required.includes('action'));
+  assert.deepEqual(tool.input_schema.properties.action.enum, ['insert', 'deposit', 'withdraw']);
+
+  assert.equal(call(chatState, 'bsAddSperm', { ...args, action: 'deposit', amount: 20 }).applied, false, '未插入不能沉积');
+  assert.equal(call(chatState, 'bsAddSperm', { ...args, action: 'insert', amount: 0 }).applied, true);
+  assert.equal(chatState.characters.A.profile.base.penetrationState, 'inserted');
+  assert.equal(chatState.characters.A.profile.base.penetrationSource, 'B');
+  assert.equal(chatState.characters.A.profile.base.sperms.length, 0, '插入本身不增加精液');
+  assert.equal(call(chatState, 'bsAddSperm', { ...args, male: 'C', action: 'insert', amount: 0 }).applied, true);
+  assert.equal(chatState.characters.A.profile.base.penetrationSource, 'C', '不同来源 insert 应原子交棒');
+  assert.equal(call(chatState, 'bsAddSperm', { ...args, action: 'deposit', amount: 20 }).applied, false, '旧来源不能替新来源沉积');
+  assert.equal(call(chatState, 'bsAddSperm', { ...args, action: 'withdraw', amount: 0 }).applied, false, '旧来源不能替新来源拔出');
+  assert.equal(call(chatState, 'bsAddSperm', { ...args, action: 'insert', amount: 0 }).applied, true, '可以再交棒回原来源');
+
+  assert.equal(call(chatState, 'bsAddSperm', { ...args, action: 'deposit', amount: 20 }).applied, true);
+  assert.equal(chatState.characters.A.profile.base.penetrationState, 'spent');
+  assert.equal(chatState.characters.A.profile.base.sperms[0].value, 20);
+  assert.equal(call(chatState, 'bsAddSperm', { ...args, action: 'deposit', amount: 20 }).applied, false, '沉积后不得连续重复');
+
+  call(chatState, 'bsAddSperm', { ...args, action: 'insert', amount: 0 });
+  assert.equal(call(chatState, 'bsAddSperm', { ...args, action: 'deposit', amount: 10 }).applied, true, '重新 insert 后可再次沉积');
+  assert.equal(chatState.characters.A.profile.base.sperms[0].value, 30);
+  assert.equal(call(chatState, 'bsAddSperm', { ...args, action: 'withdraw', amount: 0 }).applied, true);
+  assert.equal(chatState.characters.A.profile.base.penetrationState, 'idle');
+  assert.equal(chatState.characters.A.profile.base.penetrationSource, null);
+});
+
 test('bsSetMenstrualPhases 说明列出的阶段，正好就是实作接受的阶段', () => {
   const description = toolOf('bsSetMenstrualPhases').description;
   const accepted = ['卵泡期', '排卵期', '黄体期', '月经期', '产后恢复', '假孕期'];
@@ -77,13 +120,13 @@ test('bsUpdateCharacterStatus 是变化量而不是目标值，且被夹在上�
   assert.ok(up.characters['A'].profile.base.vitality > 80);
 });
 
-test('bsNameChild 的 childIndex 从 0 起算', () => {
+test('bsRecordExperience 的 childIndex 从 0 起算', () => {
   const chatState = one();
   chatState.characters['A'].profile.children = [{ id: 'c1', name: null }, { id: 'c2', name: null }];
-  assert.equal(call(chatState, 'bsNameChild', { female: 'A', childIndex: 0, name: '甲' }).applied, true);
+  assert.equal(call(chatState, 'bsRecordExperience', { female: 'A', action: 'child', time: '第六日', childIndex: 0, name: '甲' }).applied, true);
   assert.equal(chatState.characters['A'].profile.children[0].name, '甲');
-  assert.equal(call(chatState, 'bsNameChild', { female: 'A', childIndex: 2, name: '丙' }).applied, false, '越界该拒绝');
-  assert.match(toolOf('bsNameChild').description, /0 起算/);
+  assert.equal(call(chatState, 'bsRecordExperience', { female: 'A', action: 'child', time: '第六日', childIndex: 2, name: '丙' }).applied, false, '越界该拒绝');
+  assert.match(toolOf('bsRecordExperience').description, /从\s*0\s*起/);
 });
 
 test('bsAbortion 的 fetusIndex 从 0 起算，只拿掉那一胎', () => {
@@ -104,5 +147,5 @@ test('bsAbortion 的 fetusIndex 从 0 起算，只拿掉那一胎', () => {
     ['男', '双'],
     'fetusIndex 0 该拿掉第一胎',
   );
-  assert.match(toolOf('bsAbortion').description, /0 起算/);
+  assert.match(toolOf('bsAbortion').description, /从\s*0\s*起/);
 });
